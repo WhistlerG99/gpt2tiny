@@ -6,8 +6,8 @@ import torch.distributed as dist
 from typing import Iterator, Tuple, Optional
 from pathlib import Path
 
-DEFAULT_DATA_DIR="/teamspace/studios/this_studio/data/TinyStories_all_data/"
-
+DEFAULT_DATA_DIR="/teamspace/studios/this_studio/gpt2tiny/data/TinyStories_all_data/"
+print("__file__: ", __file__)
 
 class PreTokDataset(torch.utils.data.IterableDataset):
     def __init__(self, 
