@@ -15,10 +15,146 @@ class GPTConfig:
     n_layer: int = 8
     n_head: int = 8
     n_embed: int = 512
+    n_expert: int = 2
+    k: int = 1
     dropout: float = 0.2
     bias: bool = False
     use_rotary: bool = False
     flash: bool = True
+    noisy_gating: bool = True
+    capacity_factor: int = 10
+    load_loss_coef: float = 1e-2
+    
+
+
+@dataclass
+class MOEOutput:
+    y: torch.Tensor                    # [B, T, D]
+    load_loss: torch.Tensor             # scalar
+    load: torch.Tensor                 # [E] fraction of tokens routed to each expert
+    importance: torch.Tensor           # [E] sum of routing probs to each expert
+    n_dropped: torch.Tensor            # scalar (tokens dropped due to capacity)
+
+
+class ExpertNN(nn.Module):
+    def __init__(self, n_embed, n_hidden, dropout=0.1):
+        super().__init__()
+        self.n_embed = n_embed
+        self.n_hidden = n_hidden
+        self.fc1 = nn.Linear(n_embed, n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_embed)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = nn.functional.silu(x)
+        x = self.fc2(self.dropout(x))
+        return x
+
+
+class TopKRouter(nn.Module):
+    def __init__(self, n_embed, n_expert, k=1, noisy_gating=True):
+        super().__init__()
+        self.n_expert = n_expert
+        self.k = k
+        self.n_embed = n_embed
+        self.noisy_gating = noisy_gating
+        self.gate = nn.Linear(n_embed, n_expert, bias=False)
+
+        if noisy_gating:
+            self.noisy_gate = nn.Linear(n_embed, n_expert, bias=False)
+
+    
+    def forward(self, x):
+        logits = self.gate(x) # [N, C] -> [N, E]
+
+        if self.noisy_gating and self.training:
+            noise_std = nn.functional.softplus(self.noisy_gate(x)) + 1e-9
+            logits = logits + torch.randn_like(logits) * noise_std
+        
+        probs = nn.functional.softmax(logits, dim=-1)
+        topk_probs, topk_idx = torch.topk(probs, k=self.k, dim=-1)
+        topk_probs = topk_probs / (topk_probs.sum(dim=-1, keepdim=True) + 1e-9)
+
+        return topk_idx, topk_probs, probs
+
+
+class MOE(nn.Module):
+    def __init__(
+        self,
+        config,
+    ):
+        super().__init__()
+        self.config = config
+        
+        n_hidden = 4 * config.n_embed
+        n_hidden = int(2 * n_hidden / 3)
+        
+        self.router = TopKRouter(
+            config.n_embed,
+            config.n_expert,
+            k=config.k,
+            noisy_gating=config.noisy_gating
+        )
+        self.experts = nn.ModuleList([ExpertNN(config.n_embed, n_hidden, config.dropout) for _ in range(config.n_expert)])
+
+
+    def _load_balancing_loss(self, topk_idx, probs):
+        E = self.config.n_expert
+        
+        load_cnts = torch.bincount(topk_idx[:,0], minlength=E)
+        load_frac = load_cnts / (load_cnts.sum() + 1e-9)
+        
+        importance = probs.sum(dim=0) / (probs.sum() + 1e-9)
+        load_loss = self.config.load_loss_coef * E * (load_frac * importance).sum()
+        return load_loss, load_frac, importance
+
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        x_flat = x.reshape(B*T, C)
+        N = x_flat.size(0)
+
+        E = self.config.n_expert
+        k = self.config.k
+        
+        capacity = int(math.ceil(self.config.capacity_factor * N / E))
+        capacity = max(capacity, 1)
+        
+        topk_idx, topk_probs, probs = self.router(x_flat)
+
+        token_ids = torch.arange(N, device = x.device).expand(k, N).transpose(1,0).reshape(-1)
+        expert_ids = topk_idx.reshape(-1)
+        expert_probs = topk_probs.reshape(-1)
+
+        
+        expert_idx_s = torch.argsort(expert_ids)
+        token_ids_s = token_ids[expert_idx_s]
+        expert_ids_s = expert_ids[expert_idx_s]
+        expert_probs_s = expert_probs[expert_idx_s]
+
+
+        is_same = torch.ones_like(expert_ids_s, dtype=torch.bool)
+        is_same[1:] = expert_ids_s[1:] != expert_ids_s[:-1]
+        
+        start_idx = torch.where(is_same)[0]
+        end_idx = torch.cat((start_idx[1:],torch.tensor([expert_ids_s.numel()], device=x.device)))
+        
+        expert_alloc = end_idx - start_idx
+        expert_alloc = torch.cat([torch.arange(n, device=x.device) for n in expert_alloc])
+        capacity_mask = expert_alloc < capacity
+
+        n_dropped = (~capacity_mask).sum()
+
+        y = torch.zeros_like(x_flat)
+        
+        for e, expert in enumerate(self.experts):
+            mask = (expert_ids_s==e) & capacity_mask
+            y[token_ids_s[mask]] += expert(x_flat[token_ids_s[mask]]) * expert_probs_s[mask].unsqueeze(-1)
+        y = y.reshape(B, T, C)
+        
+        load_loss, load_frac, importance = self._load_balancing_loss(topk_idx, probs)
+        return MOEOutput(y, load_loss, load_frac, importance, n_dropped)
 
 
 class CausalSelfAttention(nn.Module):
@@ -96,12 +232,16 @@ class Block(nn.Module):
         self.ln_1 = nn.RMSNorm(config.n_embed)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.RMSNorm(config.n_embed)
-        self.ffd = FeedForward(config)
+        self.moe = MOE(config)
+        # self.ffd = FeedForward(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.ffd(self.ln_2(x))
-        return x
+
+        x_moe = self.moe(self.ln_2(x))
+        x = x + x_moe.y
+        load_loss = x_moe.load_loss
+        return x, load_loss
 
 
 class GPT2(nn.Module):
@@ -151,8 +291,10 @@ class GPT2(nn.Module):
 
         x = x + pos_emb
 
+        total_load_loss = torch.tensor(0, dtype=torch.float32, device=idx.device)
         for block in self.transformer.h:
-            x = block(x)
+            x, load_loss  = block(x)
+            total_load_loss += load_loss
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -161,6 +303,7 @@ class GPT2(nn.Module):
                 
                 logits.view(-1, logits.shape[-1]), targets.view(-1), ignore_index=-1
             )
+            loss += total_load_loss
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None

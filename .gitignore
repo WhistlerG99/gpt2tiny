@@ -1,6 +1,8 @@
-mlruns
-data
-mlflow_artifacts
+mlruns/
+data/
+mlflow_artifacts/
 *.ckpt
 *.pyc
-scratch
+scratch/
+build/
+*.egg-info

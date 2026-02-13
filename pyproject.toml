@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt2tiny"                 # The package name on PyPI (hyphens OK)
+version = "0.1.0"
+description = "Simple GPT model trained on TinyStories dataset."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Christopher Gauthier" }]
+keywords = ["gpt2", "gpt2"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+[project.urls]
+Homepage = "https://example.com/gpt2tiny"
+Repository = "https://example.com/gpt2tiny"
+
+# --- tell setuptools where to find your package ---
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gpt2tiny*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# [tool.setuptools.dynamic.optional-dependencies]
+# dev  = { file = ["requirements-dev.txt"] }
+# test = { file = ["requirements-test.txt"] }
+
+# If you ship non-.py files inside gpt2tiny/, uncomment:
+[tool.setuptools]
+include-package-data = true
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: Integration tests exercising the end-to-end training and tuning workflows."
+]
