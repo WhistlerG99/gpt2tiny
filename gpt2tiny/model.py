@@ -175,38 +175,50 @@ class CausalSelfAttention(nn.Module):
                 torch.tril(torch.ones(config.block_size, config.block_size)).unsqueeze(0).unsqueeze(0),
             )
 
-    def forward(self, x):
-          config = self.config
-          B, T, C = x.shape
-          q, k, v = self.c_attn(x).split(self.config.n_embed, dim=2)
-          
-          q = q.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
-          k = k.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
-          v = v.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
+    def forward(self, x, attention_mask=None):
+        config = self.config
+        B, T, C = x.shape
+        q, k, v = self.c_attn(x).split(self.config.n_embed, dim=2)
+        
+        q = q.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
+        k = k.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
+        v = v.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
+        
+        key_mask = None
+        if attention_mask is not None:
+            key_mask = attention_mask[:, None, None, :].to(dtype=torch.bool) # (B, 1, 1, T)
+        
+        if self.flash:
+            attn_mask = None
+            if key_mask is not None:
+                attn_mask = key_mask.expand(B, 1, T, T) 
+                
+            y = nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p = self.config.dropout if self.training else 0,
+                is_causal=True,
+            )
+        else:
+            attn_pattern = (q @ k.transpose(-2,-1)) / math.sqrt(k.shape[-1])
+            
+            attn_pattern = attn_pattern.masked_fill(self.bias[: ,:, :T, :T] == 0, float("-inf"))
 
+            if key_mask is not None:
+                attn_pattern = attn_pattern.mak_fill(~key_mask, float("-inf"))                
+            
+            attn = nn.functional.softmax(attn_pattern, dim=-1)
+            y = attn @ v
+        
+        y = y.transpose(1,2).contiguous().view(B, T, C)
+        
+        y = self.resid_dropout(self.c_proj(y))
 
-          if self.flash:
-              y = nn.functional.scaled_dot_product_attention(
-                  q,
-                  k,
-                  v,
-                  attn_mask=None,
-                  dropout_p = self.config.dropout if self.training else 0,
-                  is_causal=True,
-              )
-          else:
-              attn_pattern = (q @ k.transpose(-2,-1)) / math.sqrt(k.shape[-1])
-
-              attn_pattern = attn_pattern.masked_fill(self.bias[: ,:, :T, :T] == 0, float("-inf"))
-
-              attn = nn.functional.softmax(attn_pattern, dim=-1)
-              y = attn @ v
-
-          y = y.transpose(1,2).contiguous().view(B, T, C)
-
-          y = self.resid_dropout(self.c_proj(y))
-
-          return y
+        if attention_mask is not None:
+            y = y * attention_mask[:, :, None].to(dtype=y.dtype)
+        return y
 
 
 class FeedForward(nn.Module):
@@ -226,17 +238,30 @@ class FeedForward(nn.Module):
 
 
 
-class Block(nn.Module):
+class BlockFFN(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.RMSNorm(config.n_embed)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = nn.RMSNorm(config.n_embed)
+        self.ffd = FeedForward(config)
+
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.ln_1(x), attention_mask=attention_mask)
+        x = x + self.ffd(self.ln_2(x))
+        return x
+
+
+class BlockMOE(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.RMSNorm(config.n_embed)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.RMSNorm(config.n_embed)
         self.moe = MOE(config)
-        # self.ffd = FeedForward(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.ln_1(x), attention_mask=attention_mask)
 
         x_moe = self.moe(self.ln_2(x))
         x = x + x_moe.y
@@ -252,7 +277,7 @@ class GPT2(nn.Module):
         self.transformer_dict = {
             "wte": nn.Embedding(config.vocab_size, config.n_embed),
             "drop": nn.Dropout(config.dropout),
-            "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            "h": nn.ModuleList([BlockFFN(config) for _ in range(config.n_layer)]),
             "ln_f": nn.RMSNorm(config.n_embed),
         }
 
@@ -280,7 +305,7 @@ class GPT2(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, attention_mask=None):
         B, T = idx.shape
 
         x = self.transformer.wte(idx)
@@ -291,19 +316,15 @@ class GPT2(nn.Module):
 
         x = x + pos_emb
 
-        total_load_loss = torch.tensor(0, dtype=torch.float32, device=idx.device)
         for block in self.transformer.h:
-            x, load_loss  = block(x)
-            total_load_loss += load_loss
+            x  = block(x, attention_mask=attention_mask)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             logits = self.lm_head(x)
             loss = nn.functional.cross_entropy(
-                
                 logits.view(-1, logits.shape[-1]), targets.view(-1), ignore_index=-1
             )
-            loss += total_load_loss
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None
@@ -328,8 +349,9 @@ class GPT2(nn.Module):
             idx = tokenizer.encode(x, bos=True, eos=True)
             idx = torch.tensor(idx, dtype=torch.long).unsqueeze(0)
         else:
-            idx = x            
+            idx = x
 
+        prompt_len = idx.shape[-1]
         device = next(self.parameters()).device
         idx = idx.to(device)
         
@@ -381,11 +403,68 @@ class GPT2(nn.Module):
             idx = torch.cat([idx, idx_next], dim=-1)
         
         if tokenizer:
-            result = tokenizer.decode(idx[0].tolist())
+            result = tokenizer.decode(idx[0,prompt_len:].tolist())
         else:
-            result = idx
+            result = idx[:,prompt_len:]
 
         return result
 
+
+class GPT2MOE(GPT2):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.transformer_dict = {
+            "wte": nn.Embedding(config.vocab_size, config.n_embed),
+            "drop": nn.Dropout(config.dropout),
+            "h": nn.ModuleList([BlockMOE(config) for _ in range(config.n_layer)]),
+            "ln_f": nn.RMSNorm(config.n_embed),
+        }
+
+        self.transformer_dict["wpe"] = nn.Embedding(config.block_size, config.n_embed)
+
+        self.transformer = nn.ModuleDict(self.transformer_dict)
+        self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
+
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(
+                    p, mean=0, std = 0.2 / math.sqrt(2 * config.n_layer)
+                )
+
+    def forward(self, idx, targets=None, attention_mask=None):
+        B, T = idx.shape
+
+        x = self.transformer.wte(idx)
+
+        pos_emb = self.transformer.wpe(
+            torch.arange(T, device = idx.device, dtype=torch.long)
+        )
+
+        x = x + pos_emb
+
+        total_load_loss = torch.tensor(0, dtype=torch.float32, device=idx.device)
+        for block in self.transformer.h:
+            x, load_loss  = block(x, attention_mask=attention_mask)
+            total_load_loss += load_loss
+        x = self.transformer.ln_f(x)
+
+        if targets is not None:
+            logits = self.lm_head(x)
+            loss = nn.functional.cross_entropy(
+                
+                logits.view(-1, logits.shape[-1]), targets.view(-1), ignore_index=-1
+            )
+            loss += total_load_loss
+        else:
+            logits = self.lm_head(x[:, [-1], :])
+            loss = None
+
+        return logits, loss
   
       
