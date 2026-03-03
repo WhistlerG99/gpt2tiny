@@ -5,3 +5,4 @@ sentencepiece==0.2.0
 #torch==2.4.1
 #tqdm==4.67.1
 #pytorch_lightning
+transformers

@@ -71,6 +71,9 @@ class GPT2Module(pl.LightningModule):
         logits, loss = self.model(x, y, attention_mask=None)
         self.log("val_loss", loss, prog_bar=True)
 
+        # if getattr(self.trainer, "sanity_checking", False):
+        #     return  # don't log artifacts during sanity check
+        
         if (
             batch_idx == 0
             and self.trainer.is_global_zero
