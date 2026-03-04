@@ -29,7 +29,7 @@ def _build_dataloaders(model_config: GPTConfig, trainer_config: TrainingConfig):
         PreTokDataset(
             model_config.block_size,
             split="train",
-            data_dir=[DATA_CACHE_DIR / "TinyStories_all_data_only_pretrain"],
+            data_dir=[DATA_CACHE_DIR / "TinyStories_all_data_only_pretrain", DATA_CACHE_DIR / "TinyStories_all_data_only_sft"],
             weights="Balanced",
         ),
         batch_size=trainer_config.batch_size,
@@ -40,7 +40,7 @@ def _build_dataloaders(model_config: GPTConfig, trainer_config: TrainingConfig):
         PreTokDataset(
             model_config.block_size,
             split="validation",
-            data_dir=[DATA_CACHE_DIR / "TinyStories_all_data_only_pretrain"],
+            data_dir=[DATA_CACHE_DIR / "TinyStories_all_data_only_pretrain", DATA_CACHE_DIR / "TinyStories_all_data_only_sft"],
             weights="Balanced",
         ),
         batch_size=trainer_config.batch_size,
@@ -106,7 +106,7 @@ def main(
         logger=mlf_logger,
         callbacks=[
             checkpoint_cb,
-            # LogBestCkptAndPyfuncToMLflow(module_cls=GPT2Module, register_name=model_name),
+            LogBestCkptAndPyfuncToMLflow(module_cls=GPT2Module, register_name=model_name),
         ],
         log_every_n_steps=trainer_config.log_interval,
         accumulate_grad_batches=trainer_config.gradient_accumulation_steps,
@@ -118,13 +118,13 @@ def main(
 
 if __name__ == "__main__":
     
-    model_config = GPTConfig(flash=True, block_size=64)
-    trainer_config = TrainingConfig(batch_size=64, num_workers=4, max_iters=500)
+    model_config = GPTConfig(flash=True, block_size=512)
+    trainer_config = TrainingConfig(batch_size=64, num_workers=4, max_iters=20000, eval_interval=400, log_interval=100)
 
     experiment_name = "test"
     run_name = "tinystories-pretrain"
     run_name += "-" + pd.Timestamp.now().strftime("%Y-%m-%d-%H%M%S")
 
     tokenizer = Tokenizer(f"{BASE_DIR}/data/tok4096_tinystories.model")
-    model_name = "GPT2Pretrained"
+    model_name = "GPT2TinyStoriesPretrained"
     main(experiment_name, run_name, model_name, tokenizer, model_config, trainer_config)
