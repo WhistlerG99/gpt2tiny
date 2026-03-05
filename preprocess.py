@@ -137,7 +137,7 @@ def train_vocab(vocab_size: int) -> None:
 
 def process_shard(args: tuple, vocab_size: int) -> None:
     shard_id, shard = args
-    tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}.model"
+    tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}_tinystories.model"
     tokenizer = Tokenizer(str(tokenizer_model))
 
     with open(shard, "r") as f:
@@ -148,11 +148,13 @@ def process_shard(args: tuple, vocab_size: int) -> None:
     idx = 0
     for example in tqdm(data, position=shard_id):
 
-        text = example["query"].strip()  
+        # text = example["query"].strip()
+        text = example["instruction"]["prompt:"]
         q_tokens = tokenizer.encode(text, bos=True, eos=True)
         q_len = len(q_tokens)
         
-        text = example["response"].strip()  
+        # text = example["response"].strip()
+        text = example["story"].strip()
         a_tokens = tokenizer.encode(text, bos=True, eos=True)
         a_len = len(a_tokens)
 
@@ -178,11 +180,11 @@ def process_shard(args: tuple, vocab_size: int) -> None:
 
 
 def pretokenize(vocab_size: int) -> None:
-    # data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
-    # shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
-
-    data_dir = DATA_CACHE_DIR / "MetaMathQA"
+    data_dir = DATA_CACHE_DIR / "TinyStories_all_data_only_sft"
     shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
+
+    # data_dir = DATA_CACHE_DIR / "MetaMathQA"
+    # shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
     
     func = partial(process_shard, vocab_size=vocab_size)
     with ProcessPoolExecutor() as executor:

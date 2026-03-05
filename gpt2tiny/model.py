@@ -343,71 +343,68 @@ class GPT2(nn.Module):
         min_p=None,
         tokenizer=None,
     ):
-        if isinstance(x,str):
+        if isinstance(x, str):
             if tokenizer is None:
                 raise ValueError("tokenizer must be specified if 'x' is string")
-            idx = tokenizer.encode(x, bos=True, eos=True)
+            # Key change: DO NOT append EOS to the prompt
+            idx = tokenizer.encode(x, bos=True, eos=False)
             idx = torch.tensor(idx, dtype=torch.long).unsqueeze(0)
         else:
             idx = x
-
-        prompt_len = idx.shape[-1]
+    
         device = next(self.parameters()).device
         idx = idx.to(device)
-        
+    
+        prompt_len = idx.shape[-1]
+        eos_id = getattr(tokenizer, "eos_id", 2) if tokenizer is not None else 2
+    
+        if min_p is not None:
+            min_p = float(min_p)
+    
         for _ in range(max_new_tokens):
-            context = (
-                idx
-                if idx.size(1) < self.config.block_size
-                else idx[:, -self.config.block_size :]
-            )
+            context = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(context)
-
-            logits = logits[:, -1, :] / temperature
-
+            logits = logits[:, -1, :]
+    
+            if temperature is not None and temperature > 0:
+                logits = logits / temperature
+    
+            # top-p
             if top_p is not None and top_p > 0.0:
                 probs = torch.softmax(logits, dim=-1)
-                sorted_probs, sorted_indices = torch.sort(
-                    probs, descending=True, dim=-1
-                )
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
                 cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-
-                mask = cumulative_probs >= top_p
-                mask[..., 0] = True
-
-                cutoff_indices = mask.int().argmax(dim=-1, keepdim=True)
-
+    
+                # keep smallest set with cumulative prob >= top_p
+                cutoff = (cumulative_probs >= top_p).int().argmax(dim=-1, keepdim=True)
                 top_p_mask = torch.zeros_like(logits, dtype=torch.bool)
                 for b in range(logits.size(0)):
-                    cut = cutoff_indices[b].item()
-                    kept_indices = sorted_indices[b, : cut + 1]
-                    top_p_mask[b, kept_indices] = True
-                logits[~top_p_mask] = float("-inf")
-
-            if top_k is not None:
+                    k = cutoff[b].item()
+                    keep = sorted_indices[b, : k + 1]
+                    top_p_mask[b, keep] = True
+                logits = logits.masked_fill(~top_p_mask, float("-inf"))
+    
+            # top-k
+            if top_k is not None and top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-
+                logits = logits.masked_fill(logits < v[:, [-1]], float("-inf"))
+    
+            # min_p (relative to max prob)
             if min_p is not None and min_p > 0.0:
                 logit_max = logits.max(dim=-1, keepdim=True).values
-                threshold = logit_max + torch.log(
-                    torch.tensor(min_p, device=logits.device, dtype=logits.dtype)
-                )
-                logits[logits < threshold] = float("-inf")
-
-            probs = nn.functional.softmax(logits, dim=-1)
+                logits = logits.masked_fill(logits < (logit_max + math.log(min_p)), float("-inf"))
+    
+            probs = torch.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
-
-            if idx_next == 2:
+    
+            if (idx_next == eos_id).all():
                 break
+    
             idx = torch.cat([idx, idx_next], dim=-1)
-        
-        if tokenizer:
-            result = tokenizer.decode(idx[0,prompt_len:].tolist())
-        else:
-            result = idx[:,prompt_len:]
-
-        return result
+    
+        if tokenizer is not None:
+            return tokenizer.decode(idx[0, prompt_len:].tolist())
+        return idx[:, prompt_len:]
 
 
 class GPT2MOE(GPT2):

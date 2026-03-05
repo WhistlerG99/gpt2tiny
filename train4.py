@@ -119,7 +119,7 @@ def main(
 if __name__ == "__main__":
     
     model_config = GPTConfig(flash=True, block_size=512)
-    trainer_config = TrainingConfig(batch_size=64, num_workers=4, max_iters=20000, eval_interval=400, log_interval=100)
+    trainer_config = TrainingConfig(batch_size=64, num_workers=4, max_iters=20000, eval_interval=100, log_interval=25)
 
     experiment_name = "test"
     run_name = "tinystories-pretrain"

@@ -193,3 +193,86 @@ class SFTGPT2Module(GPT2Module):
 
     def configure_optimizers(self, lr=1e-5):
         return torch.optim.AdamW(self.parameters(), lr=lr)
+
+
+class RLHFGPT2Module(SFTGPT2Module):
+
+    @torch.no_grad()
+    def _generate_w_logp(
+        self,
+        prompt_ids: torch.Tensor,
+        prompt_masks: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        max_seq_len: int,
+        temperature: float = 1.0,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        pad_id: int = 0,
+        eos_id: int = 2,
+    ):
+        rng_gen = torch.Generator(10)
+        
+        device = self.device
+        BG,T = prompt_ids.shape
+    
+        assert max_seq_len > T, "`max_seq_len` must be larger than second dimension of `prompt_ids`"
+        
+        all_ids = torch.full((BG, max_seq_len), fill_value=pad_id, dtype=torch.long, device=device)
+        all_masks = torch.full((BG, max_seq_len), fill_value=0, dtype=torch.long, device=device)
+    
+        finished = torch.zeros_like(prompt_lens).to(torch.bool)
+        
+        all_ids[:, :T] = prompt_ids
+        all_masks[:, :T] = prompt_masks
+        all_lens = prompt_lens.clone()
+    
+        gen_logp = torch.zeros((BG, max_seq_len - T), dtype=torch.float32, device=device)    
+        for t in range(max_seq_len-T):
+            max_len = int(all_lens.max().item())
+            batch = all_ids[:, :max_len], all_masks[:,:max_len], all_lens
+            logits, loss = self(*batch)
+            
+            batch_idxs = torch.arange(0, BG, device=device)
+            logits_next = logits[batch_idxs, all_lens-1, :]
+            logits_next /= temperature
+            
+            
+            if top_k is not None:
+                topk_logits, _ = torch.topk(logits_next, k=top_k, dim=-1)
+                cutoffs = topk_logits[:,[-1]]
+                logits_next[logits_next < cutoffs] = -float('inf')
+                
+            
+            if top_p is not None and 0.0 < top_p < 1.0:
+                sorted_logits, sorted_idx = torch.sort(logits_next, descending=True, dim=-1)
+                sorted_probs = nn.functional.softmax(sorted_logits, dim=-1)
+                cumprobs = torch.cumsum(sorted_probs, dim=-1)
+                
+                # Mask tokens with cumulative prob > top_p (keep at least 1 token)
+                sorted_mask = cumprobs > 0.95
+                sorted_mask[:, 0] = False
+                
+                filtered_sorted_logits = sorted_logits.masked_fill(sorted_mask, -float("inf"))
+                # Unsort back to vocab order
+                logits_next = torch.full_like(logits_next, -float("inf"))
+                logits_next = logits_next.scatter_(dim=-1, index=sorted_idx, src=filtered_sorted_logits)
+            
+            logprobs = nn.functional.log_softmax(logits_next, dim=-1)
+            probs = nn.functional.softmax(logits_next, dim=-1)
+            
+            next_tok = torch.multinomial(probs, num_samples=1, generator=rng_gen).squeeze(-1)
+            
+            gen_logp[:, t] = logprobs[batch_idxs, next_tok] * (~finished).to(torch.float32)
+            
+            all_ids[batch_idxs, all_lens] = torch.where(finished, pad_id, next_tok)
+            all_masks[batch_idxs, all_lens] = torch.where(finished, 0, 1)
+            all_lens += torch.where(finished, 0, 1)
+            finished = finished | (next_tok == eos_id)
+    
+            if finished.all():
+                break
+                            
+        return all_ids, all_masks, all_lens, gen_logp
+
+    def configure_optimizers(self, lr=1e-5):
+        return torch.optim.AdamW(self.parameters(), lr=lr)
