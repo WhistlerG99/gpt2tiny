@@ -137,15 +137,18 @@ class GPT2Module(pl.LightningModule):
 
 class SFTGPT2Module(GPT2Module):
 
-    def forward(self, idx, attention_mask, question_length):
+    def forward(self, idx, attention_mask, question_length=None):
         B, T = idx.shape
         device = idx.device
         
         x = self.model.transformer.wte(idx)
-    
-        pos_emb = self.model.transformer.wpe(
-            torch.arange(T, device = idx.device, dtype=torch.long)
-        )
+
+        if attention_mask is not None:
+            pos = torch.cumsum(attention_mask, dim=-1) - 1
+        else:
+            pos = torch.arange(T, device = idx.device, dtype=torch.long)
+
+        pos_emb = self.model.transformer.wpe(pos)
     
         x = x + pos_emb
     
@@ -154,23 +157,26 @@ class SFTGPT2Module(GPT2Module):
         x = self.model.transformer.ln_f(x)
     
         logits = self.model.lm_head(x)
-    
-        logits_shifted = logits[:,:-1,:].contiguous()
-        targets = idx[:,1:].contiguous()
-    
-        loss = nn.functional.cross_entropy(
-            logits_shifted.view(-1, logits_shifted.shape[-1]), targets.view(-1), reduction="none",
-        ).view(B,-1)
-    
-        pos = torch.arange(T - 1, device=device).unsqueeze(0).expand(B, -1)  # (B, T-1)
-        first_answer_label_pos = (question_length - 1).unsqueeze(1)             # (B, 1)
-        answer_mask = pos >= first_answer_label_pos  
-    
-        if attention_mask is not None:
-            answer_mask = answer_mask * attention_mask[:,1:]
+
+        if question_length is not None:
+            logits_shifted = logits[:,:-1,:].contiguous()
+            targets = idx[:,1:].contiguous()
         
-        loss = (loss * answer_mask).sum() / answer_mask.sum().clamp_min(1)
+            loss = nn.functional.cross_entropy(
+                logits_shifted.view(-1, logits_shifted.shape[-1]), targets.view(-1), reduction="none",
+            ).view(B,-1)
         
+            pos = torch.arange(T - 1, device=device).unsqueeze(0).expand(B, -1)  # (B, T-1)
+            first_answer_label_pos = (question_length - 1).unsqueeze(1)             # (B, 1)
+            answer_mask = pos >= first_answer_label_pos  
+        
+            if attention_mask is not None:
+                answer_mask = answer_mask * attention_mask[:,1:]
+            
+            loss = (loss * answer_mask).sum() / answer_mask.sum().clamp_min(1)
+        else:
+            loss = None
+            
         return logits, loss
 
     def training_step(self, batch, batch_idx):
@@ -210,7 +216,6 @@ class RLHFGPT2Module(SFTGPT2Module):
         pad_id: int = 0,
         eos_id: int = 2,
     ):
-        rng_gen = torch.Generator(10)
         
         device = self.device
         BG,T = prompt_ids.shape
@@ -232,8 +237,8 @@ class RLHFGPT2Module(SFTGPT2Module):
     
         for t in range(max_seq_len-T):
             max_len = int(all_lens.max().item())
-            batch = all_ids[:, :max_len], all_masks[:,:max_len], all_lens
-            logits, loss = self(*batch)
+            batch = all_ids[:, :max_len], all_masks[:,:max_len]
+            logits, _ = self(*batch)
             
             batch_idxs = torch.arange(0, BG, device=device)
             logits_next = logits[batch_idxs, all_lens-1, :]
@@ -263,10 +268,10 @@ class RLHFGPT2Module(SFTGPT2Module):
             logprobs = nn.functional.log_softmax(logits_next, dim=-1)
             probs = nn.functional.softmax(logits_next, dim=-1)
             
-            next_tok = torch.multinomial(probs, num_samples=1, generator=rng_gen).squeeze(-1)
+            next_tok = torch.multinomial(probs, num_samples=1).squeeze(-1)
             next_tok = torch.where(finished, pad_id, next_tok)
             
-            gen_logp[:, t] = torch.where(finished, 0, logprobs[batch_idxs, next_tok])# * (~finished).to(torch.float32)
+            gen_logp[:, t] = torch.where(finished, 0, logprobs[batch_idxs, next_tok])
             gen_ids[:, t] = next_tok
             gen_masks[:, t] = ~finished
             
@@ -280,5 +285,45 @@ class RLHFGPT2Module(SFTGPT2Module):
                             
         return all_ids, all_masks, all_lens, gen_ids, gen_masks, gen_logp
 
+    def gen_token_logprobs(
+        self,
+        all_ids,
+        all_masks,
+        prompt_lengths,
+        gen_masks,
+    ):
+        B, T = gen_masks.shape
+        logits, _ = self(all_ids, attention_mask=all_masks)
+        
+        log_probs= nn.functional.log_softmax(logits[:, :-1, :], dim=-1)
+        
+        log_probs = log_probs.gather(dim=-1, index=all_ids[:, 1:].unsqueeze(-1)).squeeze()
+    
+        gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
+        gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)
+        
+        log_probs = log_probs.gather(dim=-1, index=gen_pos)
+    
+        log_probs = log_probs * gen_masks.to(log_probs.dtype)
+        return log_probs
+
+    def grpo_loss(
+        self,
+        logp_new,
+        logp_old,
+        gen_masks,
+        advantages,
+        eps = 0.2,
+    ):
+        ratio = torch.exp(logp_new - logp_old)
+        
+        expected_adv1 = ratio * advantages.unsqueeze(-1)
+        expected_adv2 = torch.clamp(ratio, 1 - eps, 1 + eps) * advantages.unsqueeze(-1)
+        expected_adv = torch.minimum(expected_adv1, expected_adv2)
+        
+        loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
+        return loss.mean()
+
+    
     def configure_optimizers(self, lr=1e-5):
         return torch.optim.AdamW(self.parameters(), lr=lr)

@@ -184,20 +184,26 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
         v = v.view(B, T, config.n_head, C // config.n_head).transpose(1,2)
         
+        # key_mask = None
+        # if attention_mask is not None:
+        #     key_mask = attention_mask[:, None, None, :].to(dtype=torch.bool) # (B, 1, 1, T)
+
         key_mask = None
+        query_mask = None
         if attention_mask is not None:
-            key_mask = attention_mask[:, None, None, :].to(dtype=torch.bool) # (B, 1, 1, T)
+            key_mask = attention_mask[:, None, None, :].to(torch.bool)   # (B,1,1,T)
+            query_mask = attention_mask[:, None, :, None].to(torch.bool) # (B,1,T,1)
         
         if self.flash:
-            attn_mask = None
-            if key_mask is not None:
-                attn_mask = key_mask.expand(B, 1, T, T) 
+            # attn_mask = None
+            # if key_mask is not None:
+            #     attn_mask = key_mask#.expand(B, 1, T, T) 
                 
             y = nn.functional.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=attn_mask,
+                attn_mask=key_mask, #attn_mask,
                 dropout_p = self.config.dropout if self.training else 0,
                 is_causal=True,
             )
@@ -207,17 +213,24 @@ class CausalSelfAttention(nn.Module):
             attn_pattern = attn_pattern.masked_fill(self.bias[: ,:, :T, :T] == 0, float("-inf"))
 
             if key_mask is not None:
-                attn_pattern = attn_pattern.mak_fill(~key_mask, float("-inf"))                
+                attn_pattern = attn_pattern.masked_fill(~key_mask, float("-inf"))                
             
             attn = nn.functional.softmax(attn_pattern, dim=-1)
+            attn = self.attn_dropout(attn)
             y = attn @ v
-        
-        y = y.transpose(1,2).contiguous().view(B, T, C)
-        
-        y = self.resid_dropout(self.c_proj(y))
 
-        if attention_mask is not None:
-            y = y * attention_mask[:, :, None].to(dtype=y.dtype)
+        # zero padded query outputs
+        if query_mask is not None:
+            y = y.masked_fill(~query_mask, 0.0)
+    
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.resid_dropout(self.c_proj(y))        
+        # y = y.transpose(1,2).contiguous().view(B, T, C)
+        
+        # y = self.resid_dropout(self.c_proj(y))
+
+        # if attention_mask is not None:
+        #     y = y * attention_mask[:, :, None].to(dtype=y.dtype)
         return y
 
 
@@ -248,7 +261,12 @@ class BlockFFN(nn.Module):
 
     def forward(self, x, attention_mask=None):
         x = x + self.attn(self.ln_1(x), attention_mask=attention_mask)
+        if attention_mask is not None:
+            x = x * attention_mask[:, :, None].to(x.dtype)        
+
         x = x + self.ffd(self.ln_2(x))
+        if attention_mask is not None:
+            x = x * attention_mask[:, :, None].to(x.dtype)
         return x
 
 
@@ -310,9 +328,12 @@ class GPT2(nn.Module):
 
         x = self.transformer.wte(idx)
 
-        pos_emb = self.transformer.wpe(
-            torch.arange(T, device = idx.device, dtype=torch.long)
-        )
+        if attention_mask is not None:
+            pos = torch.cumsum(attention_mask, dim=-1) - 1
+        else:
+            pos = torch.arange(T, device = idx.device, dtype=torch.long)
+
+        pos_emb = self.transformer.wpe(pos)
 
         x = x + pos_emb
 
@@ -439,9 +460,12 @@ class GPT2MOE(GPT2):
 
         x = self.transformer.wte(idx)
 
-        pos_emb = self.transformer.wpe(
-            torch.arange(T, device = idx.device, dtype=torch.long)
-        )
+        if attention_mask is not None:
+            pos = torch.cumsum(attention_mask, dim=-1) - 1
+        else:
+            pos = torch.arange(T, device = idx.device, dtype=torch.long)
+
+        pos_emb = self.transformer.wpe(pos)
 
         x = x + pos_emb
 
