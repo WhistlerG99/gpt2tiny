@@ -3,6 +3,7 @@ import torch
 from typing import List, Optional
 from dataclasses import dataclass
 from .model import GPT2
+from .reward import Reward
 import pytorch_lightning as pl
 import torch.nn as nn
 
@@ -203,6 +204,37 @@ class SFTGPT2Module(GPT2Module):
 
 class RLHFGPT2Module(SFTGPT2Module):
 
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        prompts: Optional[List[str]] = ["A dragon in a cave"],
+        max_seq_len: int = 128,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        temperature: float = 0.8,
+        gen_every_n_epochs: int = 1,
+        num_gen: int = 10,
+    ):
+        super().__init__(
+            config,
+            tokenizer,
+            prompts = prompts,
+            max_seq_len = max_seq_len,
+            top_k = top_k,
+            top_p = top_p,
+            temperature = temperature,
+            gen_every_n_epochs = gen_every_n_epochs,
+        )
+   
+        self.judge = Reward(
+            tokenizer=tokenizer,
+            eos_token_id=tokenizer.eos_id,
+            bos_token_id=tokenizer.bos_id,
+            pad_token_id=0,
+        )
+        self.num_gen = num_gen
+        
     @torch.no_grad()
     def generate_w_logp(
         self,
@@ -324,6 +356,55 @@ class RLHFGPT2Module(SFTGPT2Module):
         loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
         return loss.mean()
 
+    def _loss(self, batch):
+        self.judge.device = self.device
+        prompt_ids, prompt_masks, prompt_lengths = batch
+        B, T = prompt_ids.shape
+        G = self.num_gen
+        
+        prompt_ids = prompt_ids.expand(G, B, -1).transpose(1,0).contiguous().view(B*G, -1)
+        prompt_masks = prompt_masks.expand(G, B, -1).transpose(1,0).contiguous().view(B*G, -1)
+        prompt_lengths = prompt_lengths.expand(G, B).transpose(1,0).contiguous().view(B*G)
+
+        all_ids, all_masks, _, _, gen_masks, logp_old = self.generate_w_logp(
+            prompt_ids,
+            prompt_masks,
+            prompt_lengths,
+            self.max_seq_len,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k
+        )
+
+        logp_new = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
+
+        rewards = self.judge.score_from_concat_ids(
+            sequences=all_ids,
+            attention_mask=all_masks,
+            prompt_lens=prompt_lengths
+        )
+        advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
+        
+        loss = self.grpo_loss(logp_new, logp_old, gen_masks, advantages.group_advantages)
+        return loss
     
+    def training_step(self, batch, batch_idx):
+        loss = self._loss(batch)
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self._loss(batch)
+        self.log("val_loss", loss, prog_bar=True)
+
+        if (
+            batch_idx == 0
+            and self.trainer.is_global_zero
+            and (self.current_epoch % self.gen_every_n_epochs == 0)
+        ):
+            self._log_generation_to_mlflow()
+
+        return loss
+        
     def configure_optimizers(self, lr=1e-5):
         return torch.optim.AdamW(self.parameters(), lr=lr)
