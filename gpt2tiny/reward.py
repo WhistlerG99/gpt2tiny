@@ -14,13 +14,13 @@ class RewardOutput:
     completion_texts: List[str]
     rewards: torch.Tensor
     raw_rewards_0_1: torch.Tensor
-    prompt_adherence: torch.Tensor
-    coherence: torch.Tensor
-    style: torch.Tensor
-    length: torch.Tensor
-    safety: torch.Tensor
-    fluency: torch.Tensor
-    degeneracy_penalty: torch.Tensor
+    prompt_adherence_rewards: torch.Tensor
+    coherence_rewards: torch.Tensor
+    style_rewards: torch.Tensor
+    length_rewards: torch.Tensor
+    safety_rewards: torch.Tensor
+    fluency_rewards: torch.Tensor
+    degeneracy_penalty_rewards: torch.Tensor
 
 
 @dataclass
@@ -198,13 +198,13 @@ class Reward:
             completion_texts=list(normalized_completions),
             rewards=torch.tensor(rewards, dtype=torch.float32, device=device),
             raw_rewards_0_1=torch.tensor(raw_rewards, dtype=torch.float32, device=device),
-            prompt_adherence=torch.tensor(prompt_scores, dtype=torch.float32, device=device),
-            coherence=torch.tensor(coherence_scores, dtype=torch.float32, device=device),
-            style=torch.tensor(style_scores, dtype=torch.float32, device=device),
-            length=torch.tensor(length_scores, dtype=torch.float32, device=device),
-            safety=torch.tensor(safety_scores, dtype=torch.float32, device=device),
-            fluency=torch.tensor(fluency_scores, dtype=torch.float32, device=device),
-            degeneracy_penalty=torch.tensor(degeneracy_penalties, dtype=torch.float32, device=device),
+            prompt_adherence_rewards=torch.tensor(prompt_scores, dtype=torch.float32, device=device),
+            coherence_rewards=torch.tensor(coherence_scores, dtype=torch.float32, device=device),
+            style_rewards=torch.tensor(style_scores, dtype=torch.float32, device=device),
+            length_rewards=torch.tensor(length_scores, dtype=torch.float32, device=device),
+            safety_rewards=torch.tensor(safety_scores, dtype=torch.float32, device=device),
+            fluency_rewards=torch.tensor(fluency_scores, dtype=torch.float32, device=device),
+            degeneracy_penalty_rewards=torch.tensor(degeneracy_penalties, dtype=torch.float32, device=device),
         )
 
     @torch.no_grad()

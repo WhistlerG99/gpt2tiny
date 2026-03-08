@@ -1,6 +1,7 @@
 import os
 import torch
 import copy
+import numpy as np
 from typing import List, Optional
 from dataclasses import dataclass
 from .model import GPT2
@@ -227,7 +228,7 @@ class RLHFGPT2Module(SFTGPT2Module):
             temperature = temperature,
             gen_every_n_epochs = gen_every_n_epochs,
         )
-        self.old_policy = None
+        self.ref_policy = None
         self.judge = Reward(
             tokenizer=tokenizer,
             eos_token_id=tokenizer.eos_id,
@@ -236,8 +237,9 @@ class RLHFGPT2Module(SFTGPT2Module):
         )
         self.num_gen = num_gen
     
-    def _store_old_policy(self):
-        self.old_policy = copy.deepcopy(self)
+    def _init_ref_policy(self):
+        self.ref_policy = copy.deepcopy(self)
+        self.ref_policy = self.ref_policy.eval()
 
     @torch.no_grad()
     def generate_w_logp(
@@ -252,6 +254,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         pad_id: int = 0,
         eos_id: int = 2,
     ):
+        old_policy = copy.deepcopy(self).eval()
         
         device = self.device
         BG,T = prompt_ids.shape
@@ -274,7 +277,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         for t in range(max_seq_len-T):
             max_len = int(all_lens.max().item())
             batch = all_ids[:, :max_len], all_masks[:,:max_len]
-            logits, _ = self.old_policy(*batch)
+            logits, _ = old_policy(*batch)
             
             batch_idxs = torch.arange(0, BG, device=device)
             logits_next = logits[batch_idxs, all_lens-1, :]
@@ -347,6 +350,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         self,
         logp_new,
         logp_old,
+        logp_ref,
         gen_masks,
         advantages,
         eps = 0.2,
@@ -358,12 +362,12 @@ class RLHFGPT2Module(SFTGPT2Module):
         expected_adv2 = torch.clamp(ratio, 1 - eps, 1 + eps) * advantages.unsqueeze(-1)
         expected_adv = torch.minimum(expected_adv1, expected_adv2)
         
-        loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
+        ppo_loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
+        ppo_loss = ppo_loss.mean()
+        
+        kl_loss = ((logp_new - logp_ref) * gen_masks).sum() / gen_masks.sum()
 
-        kl = logp_new - logp_old
-        kl = (kl * gen_masks).sum() / gen_masks.sum()
-
-        return loss.mean() + beta * kl
+        return ppo_loss + beta * kl_loss, ppo_loss.detach(), beta * kl_loss.detach()
 
     def _loss(self, batch):
         self.judge.device = self.device
@@ -387,6 +391,9 @@ class RLHFGPT2Module(SFTGPT2Module):
 
         logp_new = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
 
+        with torch.no_grad():
+            logp_ref = self.ref_policy.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
+
         rewards = self.judge.score_from_concat_ids(
             sequences=all_ids,
             attention_mask=all_masks,
@@ -394,23 +401,28 @@ class RLHFGPT2Module(SFTGPT2Module):
         )
         advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
         
-        loss = self.grpo_loss(logp_new, logp_old, gen_masks, advantages.group_advantages)
-        return loss
+        loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, advantages.group_advantages)
+        return loss, ppo_loss, kl_loss
     
     def training_step(self, batch, batch_idx):
-        if self.old_policy is None:
-            self._store_old_policy()
+        if self.ref_policy is None:
+            self._init_ref_policy()
             
-        loss = self._loss(batch)
+        loss, ppo_loss, kl_loss = self._loss(batch)
         self.log("train_loss", loss, prog_bar=True)
+        self.log("train_ppo", ppo_loss, prog_bar=False)
+        self.log("train_kldiv", kl_loss, prog_bar=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        if self.old_policy is None:
-            self._store_old_policy()
-        loss = self._loss(batch)
-        self.log("val_loss", loss, prog_bar=True)
+        if self.ref_policy is None:
+            self._init_ref_policy()
 
+        loss, ppo_loss, kl_loss = self._loss(batch)
+        self.log("val_loss", loss, prog_bar=True)
+        self.log("val_ppo", ppo_loss, prog_bar=False)
+        self.log("val_kldiv", kl_loss, prog_bar=False)
+        
         if (
             batch_idx == 0
             and self.trainer.is_global_zero
@@ -422,3 +434,62 @@ class RLHFGPT2Module(SFTGPT2Module):
         
     def configure_optimizers(self, lr=1e-5):
         return torch.optim.AdamW(self.parameters(), lr=lr)
+
+
+    @torch.no_grad()
+    def _log_generation_to_mlflow(self):
+        if self.prompts is None:
+            return 
+        
+        # --- log to MLflow ---
+        logger = getattr(self, "logger", None)
+        mlf = getattr(logger, "experiment", None) if logger is not None else None
+        run_id = getattr(logger, "run_id", None) if logger is not None else None
+        if mlf is None or run_id is None:
+            # Not using MLFlowLogger (or no active run)
+            self.print(f"[epoch={self.current_epoch}] sample generation:\n{text}\n")
+            return
+
+        os.makedirs("mlflow_artifacts", exist_ok=True)
+        fname = f"gen_epoch_{self.current_epoch:04d}_step_{self.global_step:09d}.txt"
+        fpath = os.path.join("mlflow_artifacts", fname)
+
+        self.model.eval()
+
+        with open(fpath, "w", encoding="utf-8") as f:
+            for i, prompt in enumerate(self.prompts):
+                text = self.model.generate(
+                    prompt,
+                    self.max_seq_len,
+                    top_k=self.top_k,
+                    top_p=self.top_p,
+                    tokenizer=self.tokenizer,
+                    temperature=self.temperature,
+                )
+
+                reward = self.judge.score_texts([prompt], [text])
+                reward = reward.__dict__.copy()
+
+                _ = reward.pop("prompt_texts")
+                _ = reward.pop("completion_texts")
+                _ = reward.pop("raw_rewards_0_1")
+
+                f.write(f"prompt: {prompt}\n")
+                f.write(f"max_seq_len: {self.max_seq_len}\n")
+                f.write(f"top_k: {self.top_k}\n")
+                f.write(f"top_p: {self.top_p}\n")
+                f.write(f"temperature: {self.temperature}\n\n")
+
+                for k,v in reward.items():
+                    f.write(f"{k[:-1]}: {np.round(v[0].item(),4)}\n")
+                
+                f.write("\n---\n")
+                f.write(text)
+                if i+1<len(self.prompts):
+                    f.write("\n\n+++++++++++++\n\n")
+
+        mlf.log_artifact(run_id, fpath, artifact_path="generations")
+
+        # Optional: short preview as a tag
+        preview = str(text).replace("\n", " ")[:200]
+        mlf.set_tag(run_id, f"gen_preview_epoch_{self.current_epoch}", preview)
