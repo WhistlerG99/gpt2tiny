@@ -1,5 +1,6 @@
 import os
 import torch
+import copy
 from typing import List, Optional
 from dataclasses import dataclass
 from .model import GPT2
@@ -226,7 +227,7 @@ class RLHFGPT2Module(SFTGPT2Module):
             temperature = temperature,
             gen_every_n_epochs = gen_every_n_epochs,
         )
-   
+        self.old_policy = None
         self.judge = Reward(
             tokenizer=tokenizer,
             eos_token_id=tokenizer.eos_id,
@@ -234,7 +235,10 @@ class RLHFGPT2Module(SFTGPT2Module):
             pad_token_id=0,
         )
         self.num_gen = num_gen
-        
+    
+    def _store_old_policy(self):
+        self.old_policy = copy.deepcopy(self)
+
     @torch.no_grad()
     def generate_w_logp(
         self,
@@ -270,7 +274,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         for t in range(max_seq_len-T):
             max_len = int(all_lens.max().item())
             batch = all_ids[:, :max_len], all_masks[:,:max_len]
-            logits, _ = self(*batch)
+            logits, _ = self.old_policy(*batch)
             
             batch_idxs = torch.arange(0, BG, device=device)
             logits_next = logits[batch_idxs, all_lens-1, :]
@@ -346,6 +350,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         gen_masks,
         advantages,
         eps = 0.2,
+        beta = 0.02,
     ):
         ratio = torch.exp(logp_new - logp_old)
         
@@ -354,7 +359,11 @@ class RLHFGPT2Module(SFTGPT2Module):
         expected_adv = torch.minimum(expected_adv1, expected_adv2)
         
         loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
-        return loss.mean()
+
+        kl = logp_new - logp_old
+        kl = (kl * gen_masks).sum() / gen_masks.sum()
+
+        return loss.mean() + beta * kl
 
     def _loss(self, batch):
         self.judge.device = self.device
@@ -389,11 +398,16 @@ class RLHFGPT2Module(SFTGPT2Module):
         return loss
     
     def training_step(self, batch, batch_idx):
+        if self.old_policy is None:
+            self._store_old_policy()
+            
         loss = self._loss(batch)
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        if self.old_policy is None:
+            self._store_old_policy()
         loss = self._loss(batch)
         self.log("val_loss", loss, prog_bar=True)
 
