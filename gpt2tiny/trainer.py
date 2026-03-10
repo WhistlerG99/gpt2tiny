@@ -210,6 +210,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         self,
         config,
         tokenizer,
+        lr: float = 1e-5,
         prompts: Optional[List[str]] = ["A dragon in a cave"],
         max_seq_len: int = 128,
         top_k: int = 50,
@@ -217,6 +218,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         temperature: float = 0.8,
         gen_every_n_epochs: int = 1,
         num_gen: int = 10,
+        reward_weights: Optional[dict] = None,
     ):
         super().__init__(
             config,
@@ -234,12 +236,19 @@ class RLHFGPT2Module(SFTGPT2Module):
             eos_token_id=tokenizer.eos_id,
             bos_token_id=tokenizer.bos_id,
             pad_token_id=0,
+            reward_weights=reward_weights,
         )
         self.num_gen = num_gen
+        self.lr = lr
     
     def _init_ref_policy(self):
-        self.ref_policy = copy.deepcopy(self)
-        self.ref_policy = self.ref_policy.eval()
+        self.ref_policy = copy.deepcopy(self).eval()
+
+        self.ref_policy.ref_policy = None
+
+        for p in self.ref_policy.parameters():
+            p.requires_grad = False
+    
 
     @torch.no_grad()
     def generate_w_logp(
@@ -254,7 +263,8 @@ class RLHFGPT2Module(SFTGPT2Module):
         pad_id: int = 0,
         eos_id: int = 2,
     ):
-        old_policy = copy.deepcopy(self).eval()
+        was_training = self.training
+        self.eval()
         
         device = self.device
         BG,T = prompt_ids.shape
@@ -277,7 +287,7 @@ class RLHFGPT2Module(SFTGPT2Module):
         for t in range(max_seq_len-T):
             max_len = int(all_lens.max().item())
             batch = all_ids[:, :max_len], all_masks[:,:max_len]
-            logits, _ = old_policy(*batch)
+            logits, _ = self(*batch)
             
             batch_idxs = torch.arange(0, BG, device=device)
             logits_next = logits[batch_idxs, all_lens-1, :]
@@ -321,9 +331,32 @@ class RLHFGPT2Module(SFTGPT2Module):
     
             if finished.all():
                 break
-                            
+        
+        if was_training:
+            self.train()
+        
         return all_ids, all_masks, all_lens, gen_ids, gen_masks, gen_logp
 
+    # @torch.no_grad()
+    # def gen_token_entropy(self, all_ids, all_masks, prompt_lengths, gen_masks):
+    #     BG, T = gen_masks.shape
+        
+    #     logits, _ = self(all_ids, attention_mask=all_masks)
+    
+    #     logprobs = nn.functional.log_softmax(logits[:,:-1], dim=-1)
+    
+    #     probs = logprobs.exp()
+    #     token_entropy = - (probs * logprobs).sum(-1)
+    
+    #     gen_pos = torch.arange(T, dtype=torch.long, device=all_ids.device).expand(BG, -1)
+    #     gen_pos = gen_pos + (prompt_lengths - 1).expand(T,-1).T
+    
+    #     token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
+    #     token_entropy = token_entropy * gen_masks.to(dtype=token_entropy.dtype)
+    
+    #     mean_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
+    #     return mean_entropy, token_entropy    
+    
     def gen_token_logprobs(
         self,
         all_ids,
@@ -332,19 +365,42 @@ class RLHFGPT2Module(SFTGPT2Module):
         gen_masks,
     ):
         B, T = gen_masks.shape
+
+        gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
+        gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)        
+        
         logits, _ = self(all_ids, attention_mask=all_masks)
         
         log_probs= nn.functional.log_softmax(logits[:, :-1, :], dim=-1)
+
+        # Entropy for logging only: detach first so autograd does not keep extra graph
+        with torch.no_grad():
+            log_probs_detached = log_probs.detach()
+            probs = log_probs_detached.exp()
+            token_entropy = -(probs * log_probs_detached).sum(dim=-1)
+            token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
+            token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
+            avg_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
         
-        log_probs = log_probs.gather(dim=-1, index=all_ids[:, 1:].unsqueeze(-1)).squeeze()
-    
-        gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
-        gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)
+        # probs = log_probs.exp()
+        # token_entropy = - (probs * log_probs).sum(-1).detach()
         
-        log_probs = log_probs.gather(dim=-1, index=gen_pos)
+        token_log_probs = log_probs.gather(dim=-1, index=all_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
     
-        log_probs = log_probs * gen_masks.to(log_probs.dtype)
-        return log_probs
+        # gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
+        # gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)
+        
+        token_log_probs = token_log_probs.gather(dim=-1, index=gen_pos)
+        token_log_probs = token_log_probs * gen_masks.to(log_probs.dtype)
+
+
+        
+        # token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
+        # token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
+    
+        # mean_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)        
+        
+        return token_log_probs, avg_entropy
 
     def grpo_loss(
         self,
@@ -369,6 +425,8 @@ class RLHFGPT2Module(SFTGPT2Module):
 
         return ppo_loss + beta * kl_loss, ppo_loss.detach(), beta * kl_loss.detach()
 
+
+    
     def _loss(self, batch):
         self.judge.device = self.device
         prompt_ids, prompt_masks, prompt_lengths = batch
@@ -389,11 +447,13 @@ class RLHFGPT2Module(SFTGPT2Module):
             top_k=self.top_k
         )
 
-        logp_new = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
+        logp_new, avg_entropy = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
 
         with torch.no_grad():
-            logp_ref = self.ref_policy.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
+            logp_ref, _ = self.ref_policy.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
 
+        # avg_entropy, _ = self.gen_token_entropy(all_ids, all_masks, prompt_lengths, gen_masks)
+        
         rewards = self.judge.score_from_concat_ids(
             sequences=all_ids,
             attention_mask=all_masks,
@@ -402,27 +462,38 @@ class RLHFGPT2Module(SFTGPT2Module):
         advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
         
         loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, advantages.group_advantages)
-        return loss, ppo_loss, kl_loss
+        avg_reward = rewards.rewards.mean()
+        avg_adv = advantages.group_advantages.mean()
+        std_adv = advantages.group_advantages.std()
+        
+        return loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy
     
     def training_step(self, batch, batch_idx):
         if self.ref_policy is None:
             self._init_ref_policy()
             
-        loss, ppo_loss, kl_loss = self._loss(batch)
+        loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy = self._loss(batch)
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_ppo", ppo_loss, prog_bar=False)
         self.log("train_kldiv", kl_loss, prog_bar=False)
+        self.log("train_avg_reward", avg_reward, prog_bar=False)
+        self.log("train_avg_adv", avg_adv, prog_bar=False)
+        self.log("train_std_adv", std_adv, prog_bar=False)
+        self.log("train_avg_ent", avg_entropy, prog_bar=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
         if self.ref_policy is None:
             self._init_ref_policy()
 
-        loss, ppo_loss, kl_loss = self._loss(batch)
+        loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy = self._loss(batch)
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_ppo", ppo_loss, prog_bar=False)
         self.log("val_kldiv", kl_loss, prog_bar=False)
-        
+        self.log("val_avg_reward", avg_reward, prog_bar=False)
+        self.log("val_avg_adv", avg_adv, prog_bar=False)
+        self.log("val_std_adv", std_adv, prog_bar=False)        
+        self.log("val_avg_ent", avg_entropy, prog_bar=False)
         if (
             batch_idx == 0
             and self.trainer.is_global_zero
@@ -432,8 +503,9 @@ class RLHFGPT2Module(SFTGPT2Module):
 
         return loss
         
-    def configure_optimizers(self, lr=1e-5):
-        return torch.optim.AdamW(self.parameters(), lr=lr)
+    def configure_optimizers(self):#, lr=1e-5):
+        print(f"lr = {self.lr}")
+        return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
     @torch.no_grad()
@@ -472,7 +544,7 @@ class RLHFGPT2Module(SFTGPT2Module):
 
                 _ = reward.pop("prompt_texts")
                 _ = reward.pop("completion_texts")
-                _ = reward.pop("raw_rewards_0_1")
+                # _ = reward.pop("raw_rewards_0_1")
 
                 f.write(f"prompt: {prompt}\n")
                 f.write(f"max_seq_len: {self.max_seq_len}\n")
