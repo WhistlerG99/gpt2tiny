@@ -39,7 +39,7 @@ def main(
 
     for i in range(num_shards):
         print(f"i = {i+1:02d}: Generating new batch of prompts")
-        prompts = generator.generate_many_from_pos_lists(
+        all_prompts = generator.generate_many_from_pos_lists(
             n=prompts_per_shard,
             allow_no_subject=(require_subject==False),
             min_words=min_words,
@@ -48,33 +48,35 @@ def main(
             max_features=max_features,
             **assets,
         )
-        
-        with open(output_dir / f"data{i:02d}.json", "w") as f:
-            json.dump(prompts, f)
-        
-        all_tokens = []
-        all_indices = [0]
+
+        prompts = []
+        tokens = []
+        indices = [0]
         idx = 0
-        for p in tqdm(prompts, position=i):
+        for p in tqdm(all_prompts, position=i):
             p_tokens = tokenizer.encode(p["prompt"], bos=True, eos=False)
         
             p_len = len(p_tokens)
         
             if p_len <= max_prompt_len:
-                all_tokens.extend(p_tokens)
+                prompts.append(p)
+                tokens.extend(p_tokens)
                 p_len += idx
                 idx = p_len
-                all_indices.extend([p_len])
+                indices.append(p_len)
         
-        all_tokens = np.array(all_tokens, dtype=np.uint16)
-        all_indices = np.array(all_indices, dtype=np.uint32)
-    
+        tokens = np.array(tokens, dtype=np.uint16)
+        indices = np.array(indices, dtype=np.uint32)
+
+        with open(output_dir / f"data{i:02d}.json", "w") as f:
+            json.dump(prompts, f)
+        
         with open(output_dir / f"data{i:02d}.bin", "wb") as f:
-            f.write(all_tokens.tobytes())
+            f.write(tokens.tobytes())
     
         with open(output_dir / f"indices{i:02d}.bin", "wb") as f:
-            f.write(all_indices.tobytes())
-        print(f"i = {i+1:02d}: Number of prompts {len(all_indices)-1}")
+            f.write(indices.tobytes())
+        print(f"i = {i+1:02d}: Number of prompts {len(indices)-1}")
 
 
 if __name__=="__main__":

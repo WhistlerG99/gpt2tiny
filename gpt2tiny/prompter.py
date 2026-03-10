@@ -343,9 +343,9 @@ class PromptGenerator:
             else self.templates[template_index]
         )
 
-        subject_clause = self._build_subject_clause(story_subject)
-        word_clause = self._build_word_clause(word_specs)
-        feature_clause = self._build_feature_clause(feature_phrases)
+        subject_clause, subject_statement  = self._build_subject_clause(story_subject)
+        word_clause, word_statement = self._build_word_clause(word_specs)
+        feature_clause, feature_statement = self._build_feature_clause(feature_phrases)
 
         prompt = template_fn(
             subject_clause=subject_clause,
@@ -357,6 +357,9 @@ class PromptGenerator:
             "words": [] if selected_words is None else selected_words,
             "features": [] if features is None else list(map(FEATURE_NAMES.get, features)),
             "subject": {} if story_subject is None else story_subject.__dict__,
+            "word_clause": word_statement,
+            "feature_clause": feature_statement,
+            "subject_clause": subject_statement,
         }
 
     def sample_words_by_pos(
@@ -646,7 +649,7 @@ class PromptGenerator:
 
     def _build_subject_clause(self, story_subject: Optional[StorySubject]) -> str:
         if story_subject is None:
-            return ""
+            return "", None
 
         fragment = story_subject.to_prompt_fragment(self.rng)
 
@@ -657,11 +660,11 @@ class PromptGenerator:
             fragment.replace("Write about", "The story should be about", 1),
             fragment.replace("Write about", "Center it on", 1),
         ]
-        return self.rng.choice(variants)
+        return self.rng.choice(variants), fragment.replace("Write about", "", 1).strip()
 
     def _build_word_clause(self, words: List[WordSpec]) -> str:
         if not words:
-            return ""
+            return "", None
 
         word_styles = ["default", "alt1", "alt2", "alt3", "alt4", "alt5", "alt6"]
         requirements = [
@@ -677,11 +680,11 @@ class PromptGenerator:
             f"In the story, {joined}.",
             f"The narrative must {joined}.",
         ]
-        return self.rng.choice(starters)
+        return self.rng.choice(starters), joined
 
     def _build_feature_clause(self, feature_phrases: List[str]) -> str:
         if not feature_phrases:
-            return ""
+            return "", None
 
         cleaned = [x.rstrip(". ").strip() for x in feature_phrases if x.strip()]
         joined = self._join_items(cleaned)
@@ -693,7 +696,7 @@ class PromptGenerator:
             f"In addition, {joined}.",
             f"Also ensure that {joined}.",
         ]
-        return self.rng.choice(starters)
+        return self.rng.choice(starters), joined
 
     @staticmethod
     def _dedupe_preserve_order(items: Sequence[str]) -> List[str]:
