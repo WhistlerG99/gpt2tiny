@@ -9,3 +9,4 @@ sentence-transformers==5.2.3
 sentencepiece==0.2.0
 transformers
 tqdm
+einops

@@ -1,0 +1,14 @@
+python train_sft_hf.py \
+    --exp-name sft-hf \
+    --run-prefix sft-hf \
+    --model-name SFTGPT2HF \
+    --lr 3e-5 \
+    --warmup-ratio 0.05 \
+    --batch-size 8 \
+    --max-steps 3000 \
+    --log-interval 10 \
+    --val-interval 100 \
+    --val-batches 200 \
+    --num-workers 4 \
+    --grad-accum-step 8 \
+    --gen-max-tokens 248

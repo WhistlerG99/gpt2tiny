@@ -1,0 +1,18 @@
+{
+  "counts": {
+    "total": 8555,
+    "passed": 7867,
+    "failed": 688,
+    "passed_pct": 91.96,
+    "failed_pct": 8.04,
+    "warnings": 1
+  },
+  "failed_due_to": {
+    "validation_parse_error": 1,
+    "subject_incorrect": 24,
+    "missing_required_word": 81,
+    "wrong_part_of_speech": 409,
+    "missing_feature": 261,
+    "other_or_unspecified": 7
+  }
+}

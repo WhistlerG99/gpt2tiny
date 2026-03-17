@@ -10,10 +10,11 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import sentencepiece as spm
 import glob
+from transformers import AutoTokenizer
 
 from gpt2tiny.tokenizer import Tokenizer
 
-DATA_CACHE_DIR = Path("data")
+DATA_CACHE_DIR = Path("/teamspace/studios/this_studio/gpt2tiny/data")
 DATA_CACHE_DIR.mkdir(exist_ok=True)
 
 
@@ -137,9 +138,10 @@ def train_vocab(vocab_size: int) -> None:
 
 def process_shard(args: tuple, vocab_size: int) -> None:
     shard_id, shard = args
-    tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}_tinystories.model"
-    tokenizer = Tokenizer(str(tokenizer_model))
-
+    # tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}_tinystories.model"
+    # tokenizer = Tokenizer(str(tokenizer_model))
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+    
     with open(shard, "r") as f:
         data = json.load(f)
 
@@ -149,13 +151,16 @@ def process_shard(args: tuple, vocab_size: int) -> None:
     for example in tqdm(data, position=shard_id):
 
         # text = example["query"].strip()
-        text = example["instruction"]["prompt:"]
-        q_tokens = tokenizer.encode(text, bos=True, eos=True)
+        try:           
+            text = example["instruction"]["prompt"]
+        except KeyError:
+            text = example["instruction"]["prompt:"]
+        q_tokens = tokenizer.encode(text, bos=True, eos=False)
         q_len = len(q_tokens)
         
         # text = example["response"].strip()
         text = example["story"].strip()
-        a_tokens = tokenizer.encode(text, bos=True, eos=True)
+        a_tokens = tokenizer.encode(text, bos=False, eos=True)
         a_len = len(a_tokens)
 
         if q_len + a_len <= 512:
@@ -180,9 +185,9 @@ def process_shard(args: tuple, vocab_size: int) -> None:
 
 
 def pretokenize(vocab_size: int) -> None:
-    data_dir = DATA_CACHE_DIR / "TinyStories_all_data_only_sft"
+    data_dir = DATA_CACHE_DIR / "TinyStories_custom_prompts_w_completions_sft_huggingface_gpt2_v1"
     shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
-
+    print(shard_filenames)
     # data_dir = DATA_CACHE_DIR / "MetaMathQA"
     # shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
     
@@ -203,7 +208,7 @@ def prepare_dataset(vocab_size: int) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process MetaMathQA datasets")
+    parser = argparse.ArgumentParser(description="Process datasets")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     download_parser = subparsers.add_parser(

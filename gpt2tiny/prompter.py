@@ -352,11 +352,17 @@ class PromptGenerator:
             word_clause=word_clause,
             feature_clause=feature_clause,
         )
+
+        required_words = []
+        for word, pos in selected_words:
+            required_words.append({"word": word, "pos": pos})
+                
         return {
             "prompt": self._cleanup(prompt),
-            "words": [] if selected_words is None else selected_words,
+            "words": required_words,
             "features": [] if features is None else list(map(FEATURE_NAMES.get, features)),
             "subject": {} if story_subject is None else story_subject.__dict__,
+            "feature_phrases": feature_phrases,
             "word_clause": word_statement,
             "feature_clause": feature_statement,
             "subject_clause": subject_statement,

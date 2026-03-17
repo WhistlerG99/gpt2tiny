@@ -1,13 +1,20 @@
 import os
 import torch
 import copy
+import yaml
 import numpy as np
 from typing import List, Optional
 from dataclasses import dataclass
 from .model import GPT2
 from .reward import Reward
+from .reward_v2 import (
+    StoryReward,
+    StoryRewardConfig,
+    RewardWeights,
+)
 import pytorch_lightning as pl
 import torch.nn as nn
+import textwrap
 
 
 @dataclass
@@ -41,6 +48,7 @@ class GPT2Module(pl.LightningModule):
         self,
         config,
         tokenizer,
+        lr: float = 1e-5,
         prompts: Optional[List[str]] = ["A dragon in a cave"],
         max_seq_len: int = 128,
         top_k: int = 50,
@@ -50,6 +58,7 @@ class GPT2Module(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.lr = lr
         self.model = GPT2(config)
         self.tokenizer = tokenizer
 
@@ -107,6 +116,12 @@ class GPT2Module(pl.LightningModule):
         self.model.eval()
 
         with open(fpath, "w", encoding="utf-8") as f:
+            f.write(f"max_seq_len: {self.max_seq_len}\n")
+            f.write(f"top_k: {self.top_k}\n")
+            f.write(f"top_p: {self.top_p}\n")
+            f.write(f"temperature: {self.temperature}\n")
+            f.write("\n\n+++++++++++++\n\n")
+
             for i, prompt in enumerate(self.prompts):
                 text = self.model.generate(
                     prompt,
@@ -117,13 +132,12 @@ class GPT2Module(pl.LightningModule):
                     temperature=self.temperature,
                 )
                 
-                f.write(f"prompt: {prompt}\n")
-                f.write(f"max_seq_len: {self.max_seq_len}\n")
-                f.write(f"top_k: {self.top_k}\n")
-                f.write(f"top_p: {self.top_p}\n")
-                f.write(f"temperature: {self.temperature}\n")
-                f.write("\n---\n")
-                f.write(text)
+                prompt = '\n'.join([textwrap.fill(line, width=100) for line in prompt.splitlines()])
+                text = '\n'.join([textwrap.fill(line, width=100) for line in text.splitlines()])
+                
+                f.write(f"prompt:\n{prompt}\n")
+                f.write("\n---\n\n")
+                f.write(f"completion:\n{text}")
                 if i+1<len(self.prompts):
                     f.write("\n\n+++++++++++++\n\n")
 
@@ -133,8 +147,9 @@ class GPT2Module(pl.LightningModule):
         preview = str(text).replace("\n", " ")[:200]
         mlf.set_tag(run_id, f"gen_preview_epoch_{self.current_epoch}", preview)
 
-    def configure_optimizers(self, lr=0.001):
-        return torch.optim.AdamW(self.parameters(), lr=lr)
+    def configure_optimizers(self):
+        print(f"lr = {self.lr}")
+        return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
 
@@ -198,13 +213,10 @@ class SFTGPT2Module(GPT2Module):
         ):
             self._log_generation_to_mlflow()
 
-        return loss    
-
-    def configure_optimizers(self, lr=1e-5):
-        return torch.optim.AdamW(self.parameters(), lr=lr)
+        return loss
 
 
-class RLHFGPT2Module(SFTGPT2Module):
+class GRPOGPT2Module(SFTGPT2Module):
 
     def __init__(
         self,
@@ -218,11 +230,13 @@ class RLHFGPT2Module(SFTGPT2Module):
         temperature: float = 0.8,
         gen_every_n_epochs: int = 1,
         num_gen: int = 10,
-        reward_weights: Optional[dict] = None,
+        reward_config: Optional[StoryRewardConfig] = None,
+        reward_weights: Optional[RewardWeights] = None,
     ):
         super().__init__(
             config,
             tokenizer,
+            lr=lr,
             prompts = prompts,
             max_seq_len = max_seq_len,
             top_k = top_k,
@@ -231,15 +245,20 @@ class RLHFGPT2Module(SFTGPT2Module):
             gen_every_n_epochs = gen_every_n_epochs,
         )
         self.ref_policy = None
-        self.judge = Reward(
+        # self.judge = Reward(
+        #     tokenizer=tokenizer,
+        #     eos_token_id=tokenizer.eos_id,
+        #     bos_token_id=tokenizer.bos_id,
+        #     pad_token_id=0,
+        #     reward_weights=reward_weights,
+        # )
+        self.judge = StoryReward(
             tokenizer=tokenizer,
-            eos_token_id=tokenizer.eos_id,
-            bos_token_id=tokenizer.bos_id,
-            pad_token_id=0,
-            reward_weights=reward_weights,
+            config=reward_config,
+            weights=reward_weights,
         )
         self.num_gen = num_gen
-        self.lr = lr
+        # self.lr = lr
     
     def _init_ref_policy(self):
         self.ref_policy = copy.deepcopy(self).eval()
@@ -249,7 +268,37 @@ class RLHFGPT2Module(SFTGPT2Module):
         for p in self.ref_policy.parameters():
             p.requires_grad = False
     
+    # --------------------------------------------------
+    # remove reference model from checkpoint
+    # --------------------------------------------------
+    def state_dict(self, *args, **kwargs):
+        state = super().state_dict(*args, **kwargs)
+    
+        # remove reference policy weights
+        return {k: v for k, v in state.items() if not k.startswith("ref_policy.")}
 
+
+    def load_state_dict(self, state_dict, strict=True):
+        # temporarily remove reference policy so torch doesn't expect its weights
+        ref = self.ref_policy
+        self.ref_policy = None
+    
+        result = super().load_state_dict(state_dict, strict=strict)
+    
+        # rebuild reference policy after loading
+        self._init_ref_policy()
+    
+        return result
+    # --------------------------------------------------
+    # rebuild reference policy after loading checkpoint
+    # --------------------------------------------------
+    def on_load_checkpoint(self, checkpoint):
+        self._init_ref_policy()
+
+    def on_train_start(self):
+        if self.ref_policy is None:
+            self._init_ref_policy()
+    
     @torch.no_grad()
     def generate_w_logp(
         self,
@@ -336,26 +385,6 @@ class RLHFGPT2Module(SFTGPT2Module):
             self.train()
         
         return all_ids, all_masks, all_lens, gen_ids, gen_masks, gen_logp
-
-    # @torch.no_grad()
-    # def gen_token_entropy(self, all_ids, all_masks, prompt_lengths, gen_masks):
-    #     BG, T = gen_masks.shape
-        
-    #     logits, _ = self(all_ids, attention_mask=all_masks)
-    
-    #     logprobs = nn.functional.log_softmax(logits[:,:-1], dim=-1)
-    
-    #     probs = logprobs.exp()
-    #     token_entropy = - (probs * logprobs).sum(-1)
-    
-    #     gen_pos = torch.arange(T, dtype=torch.long, device=all_ids.device).expand(BG, -1)
-    #     gen_pos = gen_pos + (prompt_lengths - 1).expand(T,-1).T
-    
-    #     token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
-    #     token_entropy = token_entropy * gen_masks.to(dtype=token_entropy.dtype)
-    
-    #     mean_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
-    #     return mean_entropy, token_entropy    
     
     def gen_token_logprobs(
         self,
@@ -382,24 +411,11 @@ class RLHFGPT2Module(SFTGPT2Module):
             token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
             avg_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
         
-        # probs = log_probs.exp()
-        # token_entropy = - (probs * log_probs).sum(-1).detach()
-        
         token_log_probs = log_probs.gather(dim=-1, index=all_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-    
-        # gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
-        # gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)
         
         token_log_probs = token_log_probs.gather(dim=-1, index=gen_pos)
         token_log_probs = token_log_probs * gen_masks.to(log_probs.dtype)
 
-
-        
-        # token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
-        # token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
-    
-        # mean_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)        
-        
         return token_log_probs, avg_entropy
 
     def grpo_loss(
@@ -429,7 +445,7 @@ class RLHFGPT2Module(SFTGPT2Module):
     
     def _loss(self, batch):
         self.judge.device = self.device
-        prompt_ids, prompt_masks, prompt_lengths = batch
+        prompt_ids, prompt_masks, prompt_lengths, prompt_metadata = batch
         B, T = prompt_ids.shape
         G = self.num_gen
         
@@ -451,21 +467,33 @@ class RLHFGPT2Module(SFTGPT2Module):
 
         with torch.no_grad():
             logp_ref, _ = self.ref_policy.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
+        
+        # rewards = self.judge.score_from_concat_ids(
+        #     sequences=all_ids,
+        #     attention_mask=all_masks,
+        #     prompt_lens=prompt_lengths
+        # )
+        # advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
+        
+        # loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, advantages.group_advantages)
+        # avg_reward = rewards.rewards.mean()
+        # avg_adv = advantages.group_advantages.mean()
+        # std_adv = advantages.group_advantages.std()
 
-        # avg_entropy, _ = self.gen_token_entropy(all_ids, all_masks, prompt_lengths, gen_masks)
-        
-        rewards = self.judge.score_from_concat_ids(
-            sequences=all_ids,
+        judgements = self.judge.score_grouped_from_token_ids(
+            input_ids=all_ids,
             attention_mask=all_masks,
-            prompt_lens=prompt_lengths
+            prompt_lengths=prompt_lengths,
+            metadata_list=prompt_metadata,
+            group_size=self.num_gen,
+            return_breakdown=False,
         )
-        advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
         
-        loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, advantages.group_advantages)
-        avg_reward = rewards.rewards.mean()
-        avg_adv = advantages.group_advantages.mean()
-        std_adv = advantages.group_advantages.std()
-        
+        loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, judgements["advantages"])
+        avg_reward = judgements["rewards"].mean()
+        avg_adv = judgements["advantages"].mean()
+        std_adv = judgements["advantages"].std()
+                
         return loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy
     
     def training_step(self, batch, batch_idx):
@@ -503,15 +531,25 @@ class RLHFGPT2Module(SFTGPT2Module):
 
         return loss
         
-    def configure_optimizers(self):#, lr=1e-5):
-        print(f"lr = {self.lr}")
-        return torch.optim.AdamW(self.parameters(), lr=self.lr)
+    # def configure_optimizers(self):#, lr=1e-5):
+    #     print(f"lr = {self.lr}")
+    #     return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
     @torch.no_grad()
     def _log_generation_to_mlflow(self):
         if self.prompts is None:
             return 
+
+        def round_floats(obj, n=2):
+            """Recursively rounds floats in a nested dictionary/list."""
+            if isinstance(obj, float):
+                return round(obj, n)
+            elif isinstance(obj, dict):
+                return {k: round_floats(v, n=n) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [round_floats(i, n=n) for i in obj]
+            return obj
         
         # --- log to MLflow ---
         logger = getattr(self, "logger", None)
@@ -529,34 +567,42 @@ class RLHFGPT2Module(SFTGPT2Module):
         self.model.eval()
 
         with open(fpath, "w", encoding="utf-8") as f:
+            f.write(f"max_seq_len: {self.max_seq_len}\n")
+            f.write(f"top_k: {self.top_k}\n")
+            f.write(f"top_p: {self.top_p}\n")
+            f.write(f"temperature: {self.temperature}\n\n")
+            
             for i, prompt in enumerate(self.prompts):
+
                 text = self.model.generate(
-                    prompt,
+                    prompt["prompt"],
                     self.max_seq_len,
                     top_k=self.top_k,
                     top_p=self.top_p,
                     tokenizer=self.tokenizer,
                     temperature=self.temperature,
                 )
+                prompt_ = copy.deepcopy(prompt)
+                prompt_.pop("word_clause", None)
+                prompt_yaml = yaml.dump(prompt_, sort_keys=False) # sort_keys=False preserves key order
+                
+                reward = self.judge.score(text, prompt)
+                reward_yaml = yaml.dump(round_floats(reward, n=4), sort_keys=False) # sort_keys=False preserves key order
+                # reward = reward.__dict__.copy()
 
-                reward = self.judge.score_texts([prompt], [text])
-                reward = reward.__dict__.copy()
-
-                _ = reward.pop("prompt_texts")
-                _ = reward.pop("completion_texts")
+                # _ = reward.pop("prompt_texts")
+                # _ = reward.pop("completion_texts")
                 # _ = reward.pop("raw_rewards_0_1")
 
-                f.write(f"prompt: {prompt}\n")
-                f.write(f"max_seq_len: {self.max_seq_len}\n")
-                f.write(f"top_k: {self.top_k}\n")
-                f.write(f"top_p: {self.top_p}\n")
-                f.write(f"temperature: {self.temperature}\n\n")
-
-                for k,v in reward.items():
-                    f.write(f"{k[:-1]}: {np.round(v[0].item(),4)}\n")
-                
+                # f.write(f"prompt: {prompt}\n")
+                f.write(f"{prompt_yaml}\n")
                 f.write("\n---\n")
-                f.write(text)
+                f.write(f"{reward_yaml}\n")
+
+                # for k,v in reward.items():
+                #     f.write(f"{k[:-1]}: {np.round(v[0].item(),4)}\n")
+                
+                # f.write(text)
                 if i+1<len(self.prompts):
                     f.write("\n\n+++++++++++++\n\n")
 
