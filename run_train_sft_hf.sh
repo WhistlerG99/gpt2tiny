@@ -5,7 +5,7 @@ python train_sft_hf.py \
     --lr 3e-5 \
     --warmup-ratio 0.05 \
     --batch-size 8 \
-    --max-steps 3000 \
+    --max-steps 100 \
     --log-interval 10 \
     --val-interval 100 \
     --val-batches 200 \

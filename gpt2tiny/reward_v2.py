@@ -459,7 +459,7 @@ class StoryReward:
                 f"Batch size {rewards.numel()} is not divisible by group_size={group_size}"
             )
 
-        advantages, group_means, group_stds = self.compute_grpo_advantages(
+        advantages, group_means, group_stds = StoryReward.compute_grpo_advantages(
             rewards=rewards,
             group_size=group_size,
             eps=advantage_eps,

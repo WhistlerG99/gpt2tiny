@@ -1,9 +1,11 @@
 import os
 import shutil
+import textwrap
+import tempfile
 import numpy as np
 import pandas as pd
 from pathlib import Path
-
+from typing import Optional, List
 import mlflow
 import mlflow.pyfunc
 import torch
@@ -209,4 +211,93 @@ class LogBestCkptAndPyfuncToMLflow(Callback):
             if self.register_name:
                 model_uri = f"runs:/{run_id}/{self.pyfunc_artifact_path}"
                 mlflow.register_model(model_uri=model_uri, name=self.register_name)
+
+
+# ============================================================
+# Callback: log generations from Huggingface GPT2 Model to MLflow whenever validation runs
+# ============================================================
+class MLflowGenerationCallback(Callback):
+    def __init__(
+        self,
+        prompts: Optional[List[str]] = None,
+        artifact_dir: str = "generations",
+        wrap_width: int = 80,
+    ):
+        super().__init__()
+        self.prompts = prompts or []
+        self.artifact_dir = artifact_dir
+        self.wrap_width = wrap_width
+
+    def _wrap_block(self, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return ""
+
+        lines = []
+        for para in text.splitlines():
+            para = para.strip()
+            if not para:
+                lines.append("")
+            else:
+                lines.append(
+                    textwrap.fill(
+                        para,
+                        width=self.wrap_width,
+                        break_long_words=False,
+                        break_on_hyphens=False,
+                    )
+                )
+        return "\n".join(lines)
+
+    def _format_generations(self, trainer, pl_module, results: List[dict]) -> str:
+        parts = [
+            f"max_seq_len: {pl_module.hparams.generation_max_new_tokens}",
+            f"top_k: {pl_module.hparams.generation_top_k}",
+            f"top_p: {pl_module.hparams.generation_top_p}",
+            f"temperature: {pl_module.hparams.generation_temperature}",
+            "",
+            "",
+        ]
+
+        for i, item in enumerate(results):
+            parts.append("+++++++++++++")
+            parts.append("")
+            parts.append("prompt:")
+            parts.append(self._wrap_block(item["prompt"]))
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+            parts.append("completion:")
+            parts.append(self._wrap_block(item["completion"]))
+            parts.append("")
+
+        return "\n".join(parts).rstrip() + "\n"
+    
+    def on_validation_epoch_end(self, trainer, pl_module):
+        # if trainer.sanity_checking:
+        #     return
+
+        if not self.prompts:
+            return
+
+        logger = trainer.logger
+        if logger is None or not isinstance(logger, MLFlowLogger):
+            return
+
+        results = pl_module.generate_from_prompts(self.prompts)
+        formatted_text = self._format_generations(trainer, pl_module, results)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(
+                tmpdir,
+                f"generations_epoch_{trainer.current_epoch:04d}_step_{trainer.global_step:08d}.txt",
+            )
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(formatted_text)
+
+            logger.experiment.log_artifact(
+                run_id=logger.run_id,
+                local_path=out_path,
+                artifact_path=self.artifact_dir,
+            )
 

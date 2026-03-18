@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import mlflow
 
-from gpt2tiny.dataset import SFTDataset 
+from gpt2tiny.dataset import PromptDataset 
 from gpt2tiny.callbacks import (
     LogBestCkptAndPyfuncToMLflow,
     MLflowGenerationCallback,
 )
-from gpt2tiny.trainer import GPT2SFTModule
+from gpt2tiny.trainer import GPT2GRPOModule
 
 import torch
 import torch.nn as nn
@@ -93,7 +93,7 @@ torch.set_float32_matmul_precision(MATMUL_PRECISION)
 # ============================================================
 # DataModule
 # ============================================================
-class SFTDataModule(pl.LightningDataModule):
+class GRPODataModule(pl.LightningDataModule):
     def __init__(
         self,
         data_dir: Path,
@@ -109,12 +109,12 @@ class SFTDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(
-            SFTDataset(
+            PromptDataset(
                 split="train",
                 data_dir=self.data_dir,
                 weights="Balanced",
             ),
-            collate_fn=lambda batch: SFTDataset.collator(batch, pad_id=self.pad_token_id),
+            collate_fn=lambda batch: PromptDataset.collator(batch, pad_id=self.pad_token_id),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
@@ -122,12 +122,12 @@ class SFTDataModule(pl.LightningDataModule):
 
     def val_dataloader(self):
         return DataLoader(
-            SFTDataset(
+            PromptDataset(
                 split="validation",
                 data_dir=self.data_dir,
                 weights="Balanced",
             ),
-            collate_fn=lambda batch: SFTDataset.collator(batch, pad_id=self.pad_token_id),
+            collate_fn=lambda batch: PromptDataset.collator(batch, pad_id=self.pad_token_id),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
@@ -141,14 +141,14 @@ def main(
     
     run_name = args.run_prefix + "-" + pd.Timestamp.now().strftime("%Y-%m-%d-%H%M%S")
 
-    datamodule = SFTDataModule(
+    datamodule = GRPODataModule(
         data_dir=DATA_DIR,
         pad_token_id=tokenizer.pad_token_id,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
         
-    module = GPT2SFTModule(
+    module = GPT2GRPOModule(
         tokenizer,
         model_name=MODEL_NAME,
         lr=args.lr,
@@ -190,7 +190,7 @@ def main(
         callbacks=[
             checkpoint_cb,
             generation_callback,
-            LogBestCkptAndPyfuncToMLflow(module_cls=GPT2SFTModule, register_name=args.model_name),
+            LogBestCkptAndPyfuncToMLflow(module_cls=GPT2GRPOModule, register_name=args.model_name),
         ],
         accelerator="auto",
         devices="auto",
@@ -239,7 +239,7 @@ def main(
 
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser(
-        description="Perform Supervised Fine-Tuning on GPT2"
+        description="Perform GRPO on GPT2"
     )
     parser.add_argument("--exp-name", type=str, required=True, help="MLFlow experiment name")
     parser.add_argument("--run-prefix", type=str, required=True, help="MLFlow run name prefix")

@@ -266,7 +266,7 @@ class PromptDataset(torch.utils.data.IterableDataset):
                 for idx in idxs:
                     start = pos[idx]
                     end = pos[idx + 1]
-                    prompt = torch.from_numpy(data[start:end].astype(np.int64)).to(self.device)
+                    prompt = torch.from_numpy(data[start:end].astype(np.int64))#.to(self.device)
                     yield prompt, metadata[idx]
 
     @staticmethod
