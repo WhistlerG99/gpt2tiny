@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -30,6 +30,9 @@ class SubjectSpec:
     place: Optional[str] = None
     goal: Optional[str] = None
 
+    @property
+    def is_empty(self):
+        return all(getattr(self, f.name) is None for f in fields(self))
 
 @dataclass
 class RewardWeights:
@@ -545,7 +548,7 @@ class StoryReward:
         sentences: Sequence[str],
         subject: Optional[SubjectSpec],
     ) -> float:
-        if subject is None:
+        if subject is None or subject.is_empty:
             return np.nan
 
         sub_scores = []
@@ -591,7 +594,7 @@ class StoryReward:
             sub_weights.append(1.0)
 
         if not sub_scores:
-            return 1.0
+            return np.nan
 
         return self._weighted_mean(sub_scores, sub_weights)
 

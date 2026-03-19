@@ -51,9 +51,6 @@ LOG_EVERY_N_STEPS=100
 GRAD_ACC_STEPS=8
 GRAD_CLIP=1.0
 
-EXPERIMENT_NAME = "gpt2_sft_tinystories_lightning"
-RUN_NAME = "gpt2_sft_run"
-
 CHECKPOINT_DIR = "./checkpoints"
 MLRUNS_DIR = "./mlruns"
 

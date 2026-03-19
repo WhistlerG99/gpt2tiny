@@ -37,50 +37,143 @@ DATA_CACHE_DIR = Path(BASE_DIR) / "data"
 
 
 MODEL_NAME = "gpt2"
-DATA_DIR = DATA_CACHE_DIR / "TinyStories_custom_prompts_w_completions_sft_huggingface_gpt2_v1"
+DATA_DIR = DATA_CACHE_DIR / "TinyStories_prompts_huggingface_gpt2_v2"
 
-BATCH_SIZE = 8
+BATCH_SIZE = 2
 NUM_WORKERS = 4
+
+NUM_GEN = 8
+MAX_SEQ_LEN = 248
+TEMPERATURE = 1.0
+TOP_K = 50
+TOP_P = 0.95
+
 LR = 3e-5
 WARMUP_RATIO=0.05
 WEIGHT_DECAY = 0.01
-MAX_STEPS = 20000
-VAL_BATCHES = 50
-VAL_CHECK_INTERVAL=100
-LOG_EVERY_N_STEPS=100
-GRAD_ACC_STEPS=8
+MAX_STEPS = 1000
+VAL_BATCHES = 16
+VAL_CHECK_INTERVAL=5
+LOG_EVERY_N_STEPS=25
+GRAD_ACC_STEPS=16
 GRAD_CLIP=1.0
 
-EXPERIMENT_NAME = "gpt2_sft_tinystories_lightning"
-RUN_NAME = "gpt2_sft_run"
+KL_BETA=0.02
+CLIP_EPS=0.2
 
 CHECKPOINT_DIR = "./checkpoints"
 MLRUNS_DIR = "./mlruns"
 
 # Supply prompts here later
-GENERATION_PROMPTS = [
-    "Tell a story. In the story, work in the adjective 'jolly' and ensure "
-    "that 'label' is used as a noun. Also ensure that plant an earlier detail "
-    "that becomes important later and there should be a clear tension or struggle in the story.",
-    "Create a short fictional story. The story should also satisfy the following: "
-    "the narrative should have at least one spoken conversation, the story has some "
-    "form of conflict in it, and the story should foreshadow a later event or reveal.",
-    "Write a brief tale. Make sure the narrative make sure 'great' appears as an "
-    "adjective, have 'succeed' function as a verb, and make sure 'animal' appears "
-    "as a noun. Also ensure that the story should include an unexpected turn and "
-    "plant an earlier detail that becomes important later.",
-    "Create a short fictional story. In the story, ensure that 'castle' is used as a noun, "
-    "ensure that 'step' is used as a noun, work in the verb 'prepare', and ensure that "
-    "'rhythm' is used as a noun. The story should also satisfy the following: the story "
-    "has a bad ending.",
-    "Write an original story. Make it about an outlaw who gets invited to a secret "
-    "meeting in a sunken chapel. The story should work in the noun 'mixer', ensure "
-    "that 'gloomy' is used as an adjective, and work in the adjective 'different'.",
+GENERATION_PROMPTS = [   
+    {   
+        'prompt': "Write a short story. The narrative must use 'handle' in its "
+                  "role as a noun, include 'map' as a noun, and use the "
+                  "adjective 'loud'.",
+        'words': [   
+            {'word': 'handle', 'pos': 'noun'},
+            {'word': 'map', 'pos': 'noun'},
+            {'word': 'loud', 'pos': 'adjective'}],
+        'features': [],
+        'subject': {},
+        'feature_phrases': [],
+        'word_clause': "use 'handle' in its role as a noun, include 'map' as a "
+                       "noun, and use the adjective 'loud'",
+        'feature_clause': None,
+        'subject_clause': None
+    },
+    {   
+        'prompt': 'Write a short story. Write about a smuggler who delivers '
+                  'food during a blackout in a military outpost. The story '
+                  "should use 'prince' in its role as a noun. Also ensure that "
+                  'there should be a surprising twist in the plot.',
+        'words': [
+            {'word': 'prince', 'pos': 'noun'}
+        ],
+        'features': ['Twist'],
+        'subject': {   
+            'character': 'smuggler',
+            'action': 'delivers food during a blackout',
+            'place': 'a military outpost',
+            'adjective': None,
+            'goal': None
+        },
+        'feature_phrases': ['there should be a surprising twist in the plot'],
+        'word_clause': "use 'prince' in its role as a noun",
+        'feature_clause': 'there should be a surprising twist in the plot',
+        'subject_clause': 'a smuggler who delivers food during a blackout in a '
+                          'military outpost.'
+    },
+    {   
+        'prompt': "Write a short story. The narrative must ensure that 'doll' "
+                  'is used as a noun. The story should also satisfy the '
+                  'following: the plot should contain a meaningful conflict, '
+                  'the narrative should contain a clear moral or takeaway, and '
+                  'include setup and payoff somewhere in the story.',
+        'words': [{'word': 'doll', 'pos': 'noun'}],
+        'features': ['Conflict', 'MoralValue', 'Foreshadowing'],
+        'subject': {},
+        'feature_phrases': [   
+            'the plot should contain a meaningful conflict',
+            'the narrative should contain a clear moral or '
+            'takeaway',
+            'include setup and payoff somewhere in the '
+            'story'
+        ],
+        "word_clause": "ensure that 'doll' is used as a noun",
+        "feature_clause": 'the plot should contain a meaningful conflict, the '
+                          'narrative should contain a clear moral or takeaway, '
+                          'and include setup and payoff somewhere in the story',
+        "subject_clause": None
+    },
+    {
+        "prompt": "Compose a narrative. Center it on a wealthy chef who joins a "
+                  "circus in an airport. Make sure the narrative use 'believe' in its "
+                  "role as a verb and have 'pass' function as a noun. In addition, "
+                  "include at least one moment of direct conversation between "
+                  "characters, the ending should be unhappy, and there should be a "
+                  "clear tension or struggle in the story.",
+        "words": [
+            {"word": "believe", "pos": "verb"},
+            {"word": "pass", "pos": "noun"}
+        ],
+        "features": ["Dialogue", "BadEnding", "Conflict"],
+        "subject": {
+            'character': 'chef',
+            'action': 'joins a circus',
+            'place': 'an airport',
+            'adjective': 'wealthy',
+            'goal': None
+        },
+        "feature_phrases": ["include at least one moment of direct conversation "
+                            "between characters",
+                            "the ending should be unhappy",
+                            "there should be a clear tension or struggle in the "
+                            "story"],
+        "word_clause": "use 'believe' in its role as a verb and have 'pass' function "
+                       "as a noun",
+        "feature_clause": "include at least one moment of direct conversation between "
+                          "characters, the ending should be unhappy, and there should "
+                          "be a clear tension or struggle in the story",
+        "subject_clause": "a wealthy chef who joins a circus in an airport."
+    },
+    {
+        "prompt": "Create a short fictional story. Additional requirements: include "
+                  "at least one moment of direct conversation between characters.",
+        "words": [],
+        "features": ["Dialogue"],
+        "subject": {},
+        "feature_phrases": ["include at least one moment of direct conversation "
+                            "between characters"],
+        "word_clause": None,
+        "feature_clause": "include at least one moment of direct conversation between "
+                          "characters",
+        "subject_clause": None
+    },
 ]
 
-
 # Generation settings used whenever validation runs
-GEN_MAX_NEW_TOKENS = 128
+GEN_MAX_NEW_TOKENS = 248
 GEN_TEMPERATURE = 0.8
 GEN_TOP_K = 50
 GEN_TOP_P = 0.95
@@ -148,9 +241,32 @@ def main(
         num_workers=args.num_workers,
     )
         
-    module = GPT2GRPOModule(
-        tokenizer,
-        model_name=MODEL_NAME,
+    # module = GPT2GRPOModule(
+    #     tokenizer,
+    #     model_name=MODEL_NAME,
+    #     num_gen = args.num_gen,
+    #     max_seq_len = args.max_seq_len,
+    #     temperature = args.temperature,
+    #     top_k = args.top_k,
+    #     top_p = args.top_p,        
+    #     lr=args.lr,
+    #     warmup_ratio=args.warmup_ratio,
+    #     weight_decay=args.weight_decay,
+    #     generation_prompts=GENERATION_PROMPTS,
+    #     generation_max_new_tokens=args.gen_max_tokens,
+    #     generation_temperature=args.gen_temperature,
+    #     generation_top_k=args.gen_top_k,
+    #     generation_top_p=args.gen_top_p,
+    # )
+
+    module = GPT2GRPOModule.load_from_checkpoint(
+        args.init_model_path,
+        weights_only=False,
+        num_gen = args.num_gen,
+        max_seq_len = args.max_seq_len,
+        temperature = args.temperature,
+        top_k = args.top_k,
+        top_p = args.top_p,        
         lr=args.lr,
         warmup_ratio=args.warmup_ratio,
         weight_decay=args.weight_decay,
@@ -159,7 +275,11 @@ def main(
         generation_temperature=args.gen_temperature,
         generation_top_k=args.gen_top_k,
         generation_top_p=args.gen_top_p,
+        kl_beta=args.kl_beta,
+        clip_eps=args.clip_eps,
     )
+
+
     
     mlf_logger = MLFlowLogger(
         experiment_name=args.exp_name,
@@ -168,11 +288,11 @@ def main(
     )
     
     checkpoint_cb = ModelCheckpoint(
-        monitor="val_loss",
-        mode="min",
+        monitor="val_avg_reward",
+        mode="max",
         save_top_k=1,
         dirpath=f"{BASE_DIR}/mlruns/{mlf_logger.experiment_id}/{mlf_logger.run_id}/artifacts/",
-        filename="best-{step}-{val_loss:.4f}",
+        filename="best-{step}-{val_avg_reward:.4f}",
     )
 
     generation_callback = MLflowGenerationCallback(
@@ -212,6 +332,7 @@ def main(
     mlf_logger.log_hyperparams(
         {
             "model_name": MODEL_NAME,
+            "init_model_path": args.init_model_path,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
             "lr": args.lr,
@@ -225,6 +346,13 @@ def main(
             "num_generation_prompts": len(GENERATION_PROMPTS),
             "accumulate_grad_steps": args.grad_accum_step,
             "grad_clip": args.grad_clip,
+            "num_gen": args.num_gen,
+            "max_seq_len": args.max_seq_len,
+            "temperature": args.temperature,
+            "top_k": args.top_k,
+            "top_p": args.top_p,
+            "kl_beta": args.kl_beta,
+            "clip_eps": args.clip_eps,            
         }
     )
     
@@ -241,10 +369,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Perform GRPO on GPT2"
     )
+        
+    parser.add_argument("--init-model-path", type=str, required=True, help="starting model")
     parser.add_argument("--exp-name", type=str, required=True, help="MLFlow experiment name")
     parser.add_argument("--run-prefix", type=str, required=True, help="MLFlow run name prefix")
     parser.add_argument("--model-name", type=str, required=True, help="MLFlow model name")
+
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS, help="maximum number of steps")
+
+    parser.add_argument("--num-gen", type=int, default=NUM_GEN, help="number of completions to generate for each prompt in GRPO sampling")
+    parser.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN, help="maximum number of tokens generated in GRPO sampling")
+    parser.add_argument("--temperature", type=float, default=TEMPERATURE, help="GRPO sampling temperature")
+    parser.add_argument("--top-k", type=int, default=TOP_K, help="top-k for GRPO sampling")
+    parser.add_argument("--top-p", type=float, default=TOP_P, help="top-p for GRPO sampling")
+
+    parser.add_argument("--kl-beta", type=float, default=KL_BETA, help="top-p for GRPO sampling")
+    parser.add_argument("--clip-eps", type=float, default=CLIP_EPS, help="top-p for GRPO sampling")
+    
+    
     parser.add_argument("--lr", type=float, default=LR, help="learning rate")
     parser.add_argument("--warmup-ratio", type=float, default=WARMUP_RATIO, help="warmup ratio")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="train batch size")

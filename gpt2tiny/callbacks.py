@@ -261,6 +261,12 @@ class MLflowGenerationCallback(Callback):
 
         for i, item in enumerate(results):
             parts.append("+++++++++++++")
+            if "reward" in item:
+                parts.append("")
+                parts.append("reward:")
+                parts.append(item["reward"])
+                parts.append("")
+                parts.append("---")
             parts.append("")
             parts.append("prompt:")
             parts.append(self._wrap_block(item["prompt"]))
@@ -273,7 +279,7 @@ class MLflowGenerationCallback(Callback):
 
         return "\n".join(parts).rstrip() + "\n"
     
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def _generate_and_log_completions(self, trainer, pl_module):
         # if trainer.sanity_checking:
         #     return
 
@@ -284,13 +290,21 @@ class MLflowGenerationCallback(Callback):
         if logger is None or not isinstance(logger, MLFlowLogger):
             return
 
+        # Ensure correct mode + no grad
+        was_training = pl_module.training
+        pl_module.eval()
+        
         results = pl_module.generate_from_prompts(self.prompts)
+
+        if was_training:
+            pl_module.train()        
+        
         formatted_text = self._format_generations(trainer, pl_module, results)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             out_path = os.path.join(
                 tmpdir,
-                f"generations_epoch_{trainer.current_epoch:04d}_step_{trainer.global_step:08d}.txt",
+                f"generations_step_{trainer.global_step:08d}.txt",
             )
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(formatted_text)
@@ -301,3 +315,26 @@ class MLflowGenerationCallback(Callback):
                 artifact_path=self.artifact_dir,
             )
 
+    def on_validation_epoch_end(self, trainer, pl_module):
+        self._generate_and_log_completions(trainer, pl_module)
+
+    # def on_train_start(self, trainer, pl_module):
+    #     datamodule = trainer.datamodule
+    #     if datamodule is None:
+    #         return
+    
+    #     val_loader = datamodule.val_dataloader()
+    
+    #     was_training = pl_module.training
+    #     pl_module.eval()
+    
+    #     with torch.no_grad():
+    #         for batch_idx, batch in enumerate(val_loader):
+    #             batch = trainer.strategy.batch_to_device(batch, pl_module.device)
+    #             pl_module.validation_step(batch, batch_idx)
+    
+    #     # run your generation logging once
+    #     self._generate_and_log_completions(trainer, pl_module)
+    
+    #     if was_training:
+    #         pl_module.train()

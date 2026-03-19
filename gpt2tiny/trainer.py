@@ -23,6 +23,17 @@ import textwrap
 from transformers import AutoTokenizer, GPT2LMHeadModel
 
 
+def round_floats(obj, n=2):
+    """Recursively rounds floats in a nested dictionary/list."""
+    if isinstance(obj, float):
+        return round(obj, n)
+    elif isinstance(obj, dict):
+        return {k: round_floats(v, n=n) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [round_floats(i, n=n) for i in obj]
+    return obj
+
+
 @dataclass
 class TrainingConfig:
     learning_rate: float = 6e-4
@@ -236,6 +247,8 @@ class GRPOGPT2Module(SFTGPT2Module):
         temperature: float = 0.8,
         gen_every_n_epochs: int = 1,
         num_gen: int = 10,
+        clip_eps: float = 0.2,
+        kl_beta: float = 0.02,
         reward_config: Optional[StoryRewardConfig] = None,
         reward_weights: Optional[RewardWeights] = None,
     ):
@@ -250,6 +263,7 @@ class GRPOGPT2Module(SFTGPT2Module):
             temperature = temperature,
             gen_every_n_epochs = gen_every_n_epochs,
         )
+        self.save_hyperparameters()
         self.ref_policy = None
         # self.judge = Reward(
         #     tokenizer=tokenizer,
@@ -431,13 +445,11 @@ class GRPOGPT2Module(SFTGPT2Module):
         logp_ref,
         gen_masks,
         advantages,
-        eps = 0.2,
-        beta = 0.02,
     ):
         ratio = torch.exp(logp_new - logp_old)
         
         expected_adv1 = ratio * advantages.unsqueeze(-1)
-        expected_adv2 = torch.clamp(ratio, 1 - eps, 1 + eps) * advantages.unsqueeze(-1)
+        expected_adv2 = torch.clamp(ratio, 1 - self.hparams.clip_eps, 1 + self.hparams.clip_eps) * advantages.unsqueeze(-1)
         expected_adv = torch.minimum(expected_adv1, expected_adv2)
         
         ppo_loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
@@ -445,7 +457,7 @@ class GRPOGPT2Module(SFTGPT2Module):
         
         kl_loss = ((logp_new - logp_ref) * gen_masks).sum() / gen_masks.sum()
 
-        return ppo_loss + beta * kl_loss, ppo_loss.detach(), beta * kl_loss.detach()
+        return ppo_loss + self.hparams.kl_beta * kl_loss, ppo_loss.detach(), self.hparams.kl_beta * kl_loss.detach()
 
 
     
@@ -546,16 +558,6 @@ class GRPOGPT2Module(SFTGPT2Module):
     def _log_generation_to_mlflow(self):
         if self.prompts is None:
             return 
-
-        def round_floats(obj, n=2):
-            """Recursively rounds floats in a nested dictionary/list."""
-            if isinstance(obj, float):
-                return round(obj, n)
-            elif isinstance(obj, dict):
-                return {k: round_floats(v, n=n) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [round_floats(i, n=n) for i in obj]
-            return obj
         
         # --- log to MLflow ---
         logger = getattr(self, "logger", None)
@@ -860,6 +862,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         generation_temperature: float = 0.8,
         generation_top_k: int = 50,
         generation_top_p: float = 0.95,
+        clip_eps: float = 0.2,
+        kl_beta: float = 0.02,
         reward_config: Optional[StoryRewardConfig] = None,
         reward_weights: Optional[RewardWeights] = None,
     ):
@@ -1058,13 +1062,11 @@ class GPT2GRPOModule(GPT2SFTModule):
         logp_ref,
         gen_masks,
         advantages,
-        eps = 0.2,
-        beta = 0.02,
     ):
         ratio = torch.exp(logp_new - logp_old)
         
         expected_adv1 = ratio * advantages.unsqueeze(-1)
-        expected_adv2 = torch.clamp(ratio, 1 - eps, 1 + eps) * advantages.unsqueeze(-1)
+        expected_adv2 = torch.clamp(ratio, 1 - self.hparams.clip_eps, 1 + self.hparams.clip_eps) * advantages.unsqueeze(-1)
         expected_adv = torch.minimum(expected_adv1, expected_adv2)
         
         ppo_loss = -(expected_adv * gen_masks).sum(dim=1) / gen_masks.sum(dim=1).clamp_min(1)
@@ -1072,7 +1074,7 @@ class GPT2GRPOModule(GPT2SFTModule):
         
         kl_loss = ((logp_new - logp_ref) * gen_masks).sum() / gen_masks.sum()
 
-        return ppo_loss + beta * kl_loss, ppo_loss.detach(), beta * kl_loss.detach()
+        return ppo_loss + self.hparams.kl_beta * kl_loss, ppo_loss.detach(), self.hparams.kl_beta * kl_loss.detach()
 
 
     
@@ -1134,6 +1136,9 @@ class GPT2GRPOModule(GPT2SFTModule):
             self._init_ref_policy()
             
         loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy = self._loss(batch)
+
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]        
+        
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_ppo", ppo_loss, prog_bar=False)
         self.log("train_kldiv", kl_loss, prog_bar=False)
@@ -1141,6 +1146,7 @@ class GPT2GRPOModule(GPT2SFTModule):
         self.log("train_avg_adv", avg_adv, prog_bar=False)
         self.log("train_std_adv", std_adv, prog_bar=False)
         self.log("train_avg_ent", avg_entropy, prog_bar=False)
+        self.log("lr", lr, prog_bar=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -1155,13 +1161,66 @@ class GPT2GRPOModule(GPT2SFTModule):
         self.log("val_avg_adv", avg_adv, prog_bar=False)
         self.log("val_std_adv", std_adv, prog_bar=False)        
         self.log("val_avg_ent", avg_entropy, prog_bar=False)
-        if (
-            batch_idx == 0
-            and self.trainer.is_global_zero
-            and (self.current_epoch % self.gen_every_n_epochs == 0)
-        ):
-            self._log_generation_to_mlflow()
 
-        return loss
+        return {
+            "val_loss": loss.detach(),
+            "val_ppo": ppo_loss.detach(),
+            "val_kldiv": kl_loss.detach(),
+            "val_avg_reward": avg_reward.detach(),
+            "val_avg_adv": avg_adv.detach(),
+            "val_std_adv": std_adv.detach(),
+            "val_avg_ent": avg_entropy.detach(),
+        }
+    
 
+    @torch.no_grad()
+    def generate_from_prompts(self, prompts: List[str]) -> List[dict]:
+        self.eval()
 
+        results = []
+        device = self.device
+
+        for prompt in prompts:
+            encoded = self.tokenizer(
+                prompt["prompt"],
+                return_tensors="pt",
+                add_special_tokens=True,
+            )
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded["attention_mask"].to(device)
+
+            generated_ids = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.hparams.generation_max_new_tokens,
+                do_sample=True,
+                temperature=self.hparams.generation_temperature,
+                top_k=self.hparams.generation_top_k,
+                top_p=self.hparams.generation_top_p,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+            full_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+            reward = self.judge.score(full_text, prompt)
+            _ = reward["debug"].pop("text", None)
+            if not reward.get("feature_breakdown", {}):
+                _ = reward.pop("feature_breakdown", {})
+            reward_yaml = yaml.dump(round_floats(reward, n=4), sort_keys=False) # sort_keys=False preserves key order
+            
+            # completion-only text
+            prompt_len = input_ids.shape[1]
+            completion_ids = generated_ids[0, prompt_len:]
+            completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+
+            results.append(
+                {
+                    "prompt": prompt["prompt"],
+                    "completion": completion_text,
+                    "full_text": full_text,
+                    "reward": reward_yaml,
+                }
+            )
+
+        return results
