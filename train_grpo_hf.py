@@ -17,6 +17,10 @@ from gpt2tiny.callbacks import (
     LogBestCkptAndPyfuncToMLflow,
     MLflowGenerationCallback,
 )
+from gpt2tiny.rewards.embedding import (
+    RewardWeights,
+    StoryRewardConfig,
+)
 from gpt2tiny.trainer import GPT2GRPOModule
 
 import torch
@@ -60,6 +64,21 @@ GRAD_CLIP=1.0
 
 KL_BETA=0.02
 CLIP_EPS=0.2
+
+RW_WORDS = 0.25
+RW_POS = 0.15
+RW_SUBJECT = 0.20
+RW_FEATURES = 0.25
+RW_FORMAT = 0.15
+RW_PROMPT_COPY_PENALTY = 0.10
+RW_META_PENALTY = 0.10
+RW_REPETITION_PENALTY = 0.10
+RW_STUFFING_PENALTY = 0.10
+
+RW_MIN_CHARS=80
+RW_MAX_CHARS=2000
+RW_MIN_SENTENCES=3
+RW_MAX_SENTENCES=5
 
 CHECKPOINT_DIR = "./checkpoints"
 MLRUNS_DIR = "./mlruns"
@@ -259,6 +278,25 @@ def main(
     #     generation_top_p=args.gen_top_p,
     # )
 
+    reward_weights=RewardWeights(
+        words=args.rw_words,
+        pos=args.rw_pos,
+        subject=args.rw_subject,
+        features=args.rw_features,
+        format=args.rw_format,
+        prompt_copy_penalty=args.rw_prompt_copy_penalty,
+        meta_penalty=args.rw_meta_penalty,
+        repetition_penalty=args.rw_repetition_penalty,
+        stuffing_penalty=args.rw_stuffing_penalty,
+    )
+
+    reward_config = StoryRewardConfig(
+        min_chars=args.rw_min_chars,
+        max_chars=args.rw_max_chars,
+        min_sentences=args.rw_min_sentences,
+        max_sentences=args.rw_max_sentences,
+    )
+    
     module = GPT2GRPOModule.load_from_checkpoint(
         args.init_model_path,
         weights_only=False,
@@ -277,9 +315,11 @@ def main(
         generation_top_p=args.gen_top_p,
         kl_beta=args.kl_beta,
         clip_eps=args.clip_eps,
+        reward_weights=reward_weights,
+        reward_config=reward_config,
     )
 
-
+    module = torch.compile(module).train()
     
     mlf_logger = MLFlowLogger(
         experiment_name=args.exp_name,
@@ -352,7 +392,20 @@ def main(
             "top_k": args.top_k,
             "top_p": args.top_p,
             "kl_beta": args.kl_beta,
-            "clip_eps": args.clip_eps,            
+            "clip_eps": args.clip_eps,
+            "rw_words": args.rw_words,
+            "rw_pos": args.rw_pos,
+            "rw_subject": args.rw_subject,
+            "rw_features": args.rw_features,
+            "rw_format": args.rw_format,
+            "rw_prompt_copy_penalty": args.rw_prompt_copy_penalty,
+            "rw_meta_penalty": args.rw_meta_penalty,
+            "rw_repetition_penalty": args.rw_repetition_penalty,
+            "rw_stuffing_penalty": args.rw_stuffing_penalty,
+            "rw_min_chars": args.rw_min_chars,
+            "rw_max_chars": args.rw_max_chars,
+            "rw_min_sentences": args.rw_min_sentences,
+            "rw_max_sentences": args.rw_max_sentences,
         }
     )
     
@@ -402,6 +455,22 @@ if __name__ == "__main__":
     parser.add_argument("--gen-temperature", type=float, default=GEN_TEMPERATURE, help="generated sampling temperature")
     parser.add_argument("--gen-top-k", type=int, default=GEN_TOP_K, help="sample top-k of generated tokens")
     parser.add_argument("--gen-top-p", type=float, default=GEN_TOP_P, help="sample top-p of generated tokens")
+
+    parser.add_argument("--rw-words", type=float, default=RW_WORDS, help="Reward weights (embedding) - required words")
+    parser.add_argument("--rw-pos", type=float, default=RW_POS, help="Reward weights (embedding) - required words parts of speech")
+
+    parser.add_argument("--rw-subject", type=float, default=RW_SUBJECT, help="Reward weights (embedding) - subject adherence")
+    parser.add_argument("--rw-features", type=float, default=RW_FEATURES, help="Reward weights (embedding) - required features")
+    parser.add_argument("--rw-format", type=float, default=RW_FORMAT, help="Reward weights (embedding) - formatting")
+    parser.add_argument("--rw-prompt-copy-penalty", type=float, default=RW_PROMPT_COPY_PENALTY, help="Reward weights (embedding) - prompt copy penalty")
+    parser.add_argument("--rw-meta-penalty", type=float, default=RW_META_PENALTY, help="Reward weights (embedding) - meta-writing penalty")
+    parser.add_argument("--rw-repetition-penalty", type=float, default=RW_REPETITION_PENALTY, help="Reward weights (embedding) - repetition penalty")
+    parser.add_argument("--rw-stuffing-penalty", type=float, default=RW_STUFFING_PENALTY, help="Reward weights (embedding) - required word stuffing penalty")
+    
+    parser.add_argument("--rw-min-chars", type=int, default=RW_MIN_CHARS, help="Reward config (embedding) - minimum characters")
+    parser.add_argument("--rw-max-chars", type=int, default=RW_MAX_CHARS, help="Reward config (embedding) - maximum characters")
+    parser.add_argument("--rw-min-sentences", type=int, default=RW_MIN_SENTENCES, help="Reward config (embedding) - minimum sentences")
+    parser.add_argument("--rw-max-sentences", type=int, default=RW_MAX_SENTENCES, help="Reward config (embedding) - maximum sentences")
     
     args = parser.parse_args()
 

@@ -134,10 +134,23 @@ class Reward:
     # =========================================================
 
     @torch.no_grad()
+    def score(
+        self,
+        completion_text: str,
+        prompt_text: str,
+        *,
+        device: Optional[torch.device] = None,
+    ) -> Dict[str, Any]:
+
+        reward = self.score_texts([completion_text], [prompt_text])
+        reward = {k: v.detach()[0].item() if isinstance(v,torch.Tensor) else v[0] for k,v in reward.__dict__.items()}
+        return reward
+    
+    @torch.no_grad()
     def score_texts(
         self,
-        prompt_texts: Sequence[str],
         completion_texts: Sequence[str],
+        prompt_texts: Sequence[str],
         *,
         device: Optional[torch.device] = None,
     ) -> RewardOutput:
@@ -288,7 +301,7 @@ class Reward:
             prompt_texts.append(prompt_text)
             completion_texts.append(completion_text)
 
-        return self.score_texts(prompt_texts, completion_texts, device=device)
+        return self.score_texts(completion_texts, prompt_texts, device=device)
 
     @torch.no_grad()
     def compute_group_stats(
@@ -370,6 +383,8 @@ class Reward:
     # Tokenizer helpers
     # =========================================================
 
+    @torch._dynamo.disable
+    
     def decode(self, token_ids: torch.Tensor, *, skip_special_tokens: bool = True) -> str:
         """
         Robust decode for:

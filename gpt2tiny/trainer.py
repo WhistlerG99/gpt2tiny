@@ -3,11 +3,12 @@ import torch
 import copy
 import yaml
 import numpy as np
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 from .model import GPT2
-from .reward import Reward
-from .reward_v2 import (
+from .rewards.heuristic import Reward
+from .rewards.embedding import (
     StoryReward,
     StoryRewardConfig,
     RewardWeights,
@@ -32,6 +33,29 @@ def round_floats(obj, n=2):
     elif isinstance(obj, list):
         return [round_floats(i, n=n) for i in obj]
     return obj
+
+
+def avg_embed_reward_comps(rewards):
+    if "details" not in rewards:
+        return {}
+        
+    reward_comps = defaultdict(list)
+    for d in rewards["details"]:
+        for k,v in d["components"].items():
+            reward_comps["rw_comp_"+k].append(v)
+    
+        for k,v in d["penalties"].items():
+            reward_comps["rw_pen_"+k].append(v)
+    
+    reward_comp_avgs = {}
+    for k,v in reward_comps.items():
+        inner = np.array(v)
+        
+        if np.all(np.isnan(inner)):
+            reward_comp_avgs[k] = np.nan  # or 0, depending on your logic
+        else:
+            reward_comp_avgs[k] = np.nanmean(inner)
+    return reward_comp_avgs
 
 
 @dataclass
@@ -864,6 +888,7 @@ class GPT2GRPOModule(GPT2SFTModule):
         generation_top_p: float = 0.95,
         clip_eps: float = 0.2,
         kl_beta: float = 0.02,
+        # reward_weights: Optional[Dict[str, float]] = None
         reward_config: Optional[StoryRewardConfig] = None,
         reward_weights: Optional[RewardWeights] = None,
     ):
@@ -882,6 +907,14 @@ class GPT2GRPOModule(GPT2SFTModule):
         self.save_hyperparameters(ignore=["generation_prompts"])
         self.ref_policy = None
 
+        # self.judge = Reward(
+        #     tokenizer=self.tokenizer,
+        #     eos_token_id=self.tokenizer.eos_token_id,
+        #     bos_token_id=self.tokenizer.bos_token_id,
+        #     pad_token_id=self.tokenizer.pad_token_id,
+        #     reward_weights=reward_weights,
+        # )        
+        
         self.judge = StoryReward(
             tokenizer=self.tokenizer,
             config=reward_config,
@@ -897,12 +930,26 @@ class GPT2GRPOModule(GPT2SFTModule):
 
    
     def _init_ref_policy(self):
-        self.ref_policy = copy.deepcopy(self).eval()
+        self.ref_policy = copy.deepcopy(self)
 
         self.ref_policy.ref_policy = None
 
         for p in self.ref_policy.parameters():
             p.requires_grad = False
+
+        # permanently eval mode
+        self.ref_policy.eval()
+    
+        # IMPORTANT: disable dropout entirely
+        for m in self.ref_policy.modules():
+            if isinstance(m, nn.Dropout):
+                m.p = 0.0
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.ref_policy is not None:
+            self.ref_policy.eval()
+        return self
     
     # --------------------------------------------------
     # remove reference model from checkpoint
@@ -955,7 +1002,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         BG,T = prompt_ids.shape
     
         assert max_seq_len > T, "`max_seq_len` must be larger than second dimension of `prompt_ids`"
-        
+        assert temperature > 0.0, "`temperature` must be > 0"
+
         all_ids = torch.full((BG, max_seq_len), fill_value=pad_id, dtype=torch.long, device=device)
         all_masks = torch.zeros((BG, max_seq_len), dtype=torch.long, device=device)
     
@@ -965,20 +1013,22 @@ class GPT2GRPOModule(GPT2SFTModule):
         all_masks[:, :T] = prompt_masks
         all_lens = prompt_lens.clone()
     
-        gen_ids = torch.full((BG, max_seq_len - T), fill_value=pad_id, dtype=torch.long, device=device)    
-        gen_masks = torch.zeros((BG, max_seq_len - T), dtype=torch.long, device=device)    
-        gen_logp = torch.zeros((BG, max_seq_len - T), dtype=torch.float32, device=device)    
+        gen_T = max_seq_len - T
+        gen_ids = torch.full((BG, gen_T), fill_value=pad_id, dtype=torch.long, device=device)    
+        gen_masks = torch.zeros((BG, gen_T), dtype=torch.long, device=device)    
+        gen_logp = torch.zeros((BG, gen_T), dtype=torch.float32, device=device)    
     
-        for t in range(max_seq_len-T):
+        for t in range(gen_T):
             max_len = int(all_lens.max().item())
             batch = all_ids[:, :max_len], all_masks[:,:max_len]
             logits = self(*batch).logits
             
             batch_idxs = torch.arange(0, BG, device=device)
-            logits_next = logits[batch_idxs, all_lens-1, :]
-            logits_next /= temperature
-            
-            
+            logits_next_policy = logits[batch_idxs, all_lens-1, :]
+            logits_next = logits_next_policy / temperature
+
+            logprobs_policy = nn.functional.log_softmax(logits_next_policy, dim=-1)
+
             if top_k is not None:
                 topk_logits, _ = torch.topk(logits_next, k=top_k, dim=-1)
                 cutoffs = topk_logits[:,[-1]]
@@ -1005,7 +1055,7 @@ class GPT2GRPOModule(GPT2SFTModule):
             next_tok = torch.multinomial(probs, num_samples=1).squeeze(-1)
             next_tok = torch.where(finished, pad_id, next_tok)
             
-            gen_logp[:, t] = torch.where(finished, 0, logprobs[batch_idxs, next_tok])
+            gen_logp[:, t] = torch.where(finished, 0, logprobs_policy[batch_idxs, next_tok])
             gen_ids[:, t] = next_tok
             gen_masks[:, t] = ~finished
             
@@ -1088,7 +1138,19 @@ class GPT2GRPOModule(GPT2SFTModule):
         prompt_masks = prompt_masks.expand(G, B, -1).transpose(1,0).contiguous().view(B*G, -1)
         prompt_lengths = prompt_lengths.expand(G, B).transpose(1,0).contiguous().view(B*G)
 
-        all_ids, all_masks, _, _, gen_masks, logp_old = self.generate_w_logp(
+        print(f"1) model is in training mode? - {self.model.training}")
+        print(f"1) reference model is in training mode? - {self.ref_policy.training}")
+        
+        was_training = self.training
+        self.eval()
+        self.ref_policy.eval()
+        if hasattr(self.judge, "eval"):
+            self.judge.eval()
+
+        print(f"2) model is in training mode? - {self.model.training}")
+        print(f"2) reference model is in training mode? - {self.ref_policy.training}")
+        
+        all_ids, all_masks, all_lens, _, gen_masks, logp_old = self.generate_w_logp(
             prompt_ids,
             prompt_masks,
             prompt_lengths,
@@ -1098,79 +1160,120 @@ class GPT2GRPOModule(GPT2SFTModule):
             top_k=self.hparams.top_k
         )
 
+        avg_comp_len = (all_lens - prompt_lengths).to(dtype=torch.float32).mean()
+        
         logp_new, avg_entropy = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
 
+        print("max diffence between new and old" ,(torch.exp(logp_new - logp_old) - 1).abs().max())
+        
         with torch.no_grad():
             logp_ref, _ = self.ref_policy.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
-        
+
+        print("max diffence between ref and old" ,(torch.exp(logp_ref - logp_old) - 1).abs().max())
+
         # rewards = self.judge.score_from_concat_ids(
         #     sequences=all_ids,
         #     attention_mask=all_masks,
         #     prompt_lens=prompt_lengths
         # )
-        # advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.num_gen)
+        # advantages = self.judge.compute_grpo_advantages(rewards.rewards, group_size=self.hparams.num_gen)
         
         # loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, advantages.group_advantages)
         # avg_reward = rewards.rewards.mean()
+        # std_reward = rewards.rewards.std()
         # avg_adv = advantages.group_advantages.mean()
         # std_adv = advantages.group_advantages.std()
-
+        
         judgements = self.judge.score_grouped_from_token_ids(
             input_ids=all_ids,
             attention_mask=all_masks,
             prompt_lengths=prompt_lengths,
             metadata_list=prompt_metadata,
             group_size=self.hparams.num_gen,
-            return_breakdown=False,
+            return_breakdown=True,
         )
         
         loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, judgements["advantages"])
         avg_reward = judgements["rewards"].mean()
+        std_reward = judgements["rewards"].std()
         avg_adv = judgements["advantages"].mean()
         std_adv = judgements["advantages"].std()
-                
-        return loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy
-    
+
+        output = {
+            "loss": loss,
+            "ppo": ppo_loss,
+            "kldiv": kl_loss,
+            "avg_ent": avg_entropy,
+            "avg_reward": avg_reward,
+            "std_reward": std_reward,
+            "avg_adv": avg_adv,
+            "std_adv": std_adv,
+            "avg_length": avg_comp_len,
+        }
+
+        reward_comp_avgs = avg_embed_reward_comps(judgements)
+        output.update(reward_comp_avgs)
+        
+        if was_training:
+            self.train()
+
+        print(f"3) model is in training mode? - {self.model.training}")
+        print(f"3) reference model is in training mode? - {self.ref_policy.training}")        
+        
+        # return loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy
+        return output
+
     def training_step(self, batch, batch_idx):
         if self.ref_policy is None:
             self._init_ref_policy()
             
-        loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy = self._loss(batch)
+        output = self._loss(batch)
 
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]        
         
-        self.log("train_loss", loss, prog_bar=True)
-        self.log("train_ppo", ppo_loss, prog_bar=False)
-        self.log("train_kldiv", kl_loss, prog_bar=False)
-        self.log("train_avg_reward", avg_reward, prog_bar=False)
-        self.log("train_avg_adv", avg_adv, prog_bar=False)
-        self.log("train_std_adv", std_adv, prog_bar=False)
-        self.log("train_avg_ent", avg_entropy, prog_bar=False)
+        for k,v in output.items():
+            if k.startswith("rw_comp_"):
+                self.log(f"train/rw_comp/train_{k}", v, prog_bar=(k == "loss"))
+            if k.startswith("rw_pen_"):
+                self.log(f"train/rw_penalty/train_{k}", v, prog_bar=(k == "loss"))
+            else:
+                self.log(f"train_{k}", v, prog_bar=(k == "loss"))
+
+        # self.log("train_loss", loss, prog_bar=True)
+        # self.log("train_ppo", ppo_loss, prog_bar=False)
+        # self.log("train_kldiv", kl_loss, prog_bar=False)
+        # self.log("train_avg_reward", avg_reward, prog_bar=False)
+        # self.log("train_avg_adv", avg_adv, prog_bar=False)
+        # self.log("train_std_adv", std_adv, prog_bar=False)
+        # self.log("train_avg_ent", avg_entropy, prog_bar=False)
         self.log("lr", lr, prog_bar=False)
-        return loss
+        return output["loss"]
 
     def validation_step(self, batch, batch_idx):
         if self.ref_policy is None:
             self._init_ref_policy()
 
-        loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy = self._loss(batch)
-        self.log("val_loss", loss, prog_bar=True)
-        self.log("val_ppo", ppo_loss, prog_bar=False)
-        self.log("val_kldiv", kl_loss, prog_bar=False)
-        self.log("val_avg_reward", avg_reward, prog_bar=False)
-        self.log("val_avg_adv", avg_adv, prog_bar=False)
-        self.log("val_std_adv", std_adv, prog_bar=False)        
-        self.log("val_avg_ent", avg_entropy, prog_bar=False)
+        output = self._loss(batch)
 
-        return {
-            "val_loss": loss.detach(),
-            "val_ppo": ppo_loss.detach(),
-            "val_kldiv": kl_loss.detach(),
-            "val_avg_reward": avg_reward.detach(),
-            "val_avg_adv": avg_adv.detach(),
-            "val_std_adv": std_adv.detach(),
-            "val_avg_ent": avg_entropy.detach(),
-        }
+        for k,v in output.items():
+            if k.startswith("rw_comp_"):
+                self.log(f"val/rw_comp/val_{k}", v, prog_bar=(k == "loss"))
+            if k.startswith("rw_pen_"):
+                self.log(f"val/rw_penalty/val_{k}", v, prog_bar=(k == "loss"))
+            else:
+                self.log(f"val_{k}", v, prog_bar=(k == "loss"))
+                
+        for k,v in output.items():
+            self.log(f"val_{k}", v, prog_bar=(k == "loss"))
+        # self.log("val_loss", loss, prog_bar=True)
+        # self.log("val_ppo", ppo_loss, prog_bar=False)
+        # self.log("val_kldiv", kl_loss, prog_bar=False)
+        # self.log("val_avg_reward", avg_reward, prog_bar=False)
+        # self.log("val_avg_adv", avg_adv, prog_bar=False)
+        # self.log("val_std_adv", std_adv, prog_bar=False)        
+        # self.log("val_avg_ent", avg_entropy, prog_bar=False)
+
+        return output
     
 
     @torch.no_grad()
@@ -1203,17 +1306,27 @@ class GPT2GRPOModule(GPT2SFTModule):
 
             full_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-            reward = self.judge.score(full_text, prompt)
-            _ = reward["debug"].pop("text", None)
-            if not reward.get("feature_breakdown", {}):
-                _ = reward.pop("feature_breakdown", {})
-            reward_yaml = yaml.dump(round_floats(reward, n=4), sort_keys=False) # sort_keys=False preserves key order
-            
             # completion-only text
             prompt_len = input_ids.shape[1]
             completion_ids = generated_ids[0, prompt_len:]
             completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
 
+            if isinstance(self.judge, Reward):
+                reward = self.judge.score(completion_text, prompt["prompt"])
+                _ = reward.pop("prompt_texts", None)
+                _ = reward.pop("completion_texts", None)
+            
+            else:
+                reward = self.judge.score(completion_text, prompt)        
+                if "debug" in reward:
+                    _ = reward["debug"].pop("text", None)
+                if not reward.get("feature_breakdown", {}):
+                    _ = reward.pop("feature_breakdown", {})
+
+
+            reward_yaml = yaml.dump(round_floats(reward, n=4), sort_keys=False) # sort_keys=False preserves key order
+            
+            
             results.append(
                 {
                     "prompt": prompt["prompt"],

@@ -3,25 +3,31 @@ MLF_DIR=/teamspace/studios/this_studio/gpt2tiny/mlruns
 python train_grpo_hf.py \
     --init-model-path ${MLF_DIR}/599992188948983400/1c02a79ac66343b7a5c96e78879077a9/artifacts/checkpoints/best-step=2300-val_loss=2.0833.ckpt \
     --exp-name grpo-hf \
-    --run-prefix grpo-hf \
-    --model-name GRPOGPT2HF \
+    --run-prefix grpo-hf-embedding-reward \
+    --model-name GRPOGPT2HF_embedding_reward \
     --num-gen 8 \
-    --max-seq-len 248 \
-    --temperature 0.9 \
+    --max-seq-len 128 \
+    --temperature 0.8 \
     --top-k 50 \
-    --top-p 0.95 \
+    --top-p 0.9 \
     --lr 3e-5 \
     --warmup-ratio 0.05 \
-    --batch-size 2 \
+    --batch-size 4 \
     --max-steps 100 \
     --log-interval 1 \
     --val-interval 5 \
     --val-batches 16 \
     --num-workers 4 \
     --grad-accum-step 8 \
-    --gen-max-tokens 248 \
-    --gen-temperature 0.9 \
+    --gen-max-tokens 128 \
+    --gen-temperature 0.8 \
     --gen-top-k 50 \
-    --gen-top-p 0.95 \
+    --gen-top-p 0.9 \
     --kl-beta 0.03 \
-    --clip-eps 0.2
+    --clip-eps 0.2 \
+    --rw-words 0.15 \
+    --rw-repetition-penalty 0.2 \
+    --rw-min-chars 500 \
+    --rw-max-chars 1000 \
+    --rw-min-sentences 4 \
+    --rw-max-sentences 9
