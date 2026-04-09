@@ -84,12 +84,14 @@ class TrainingConfig:
     compile: bool = True
 
 
-class GPT2Module(pl.LightningModule):
+class PreTrainGPT2Module(pl.LightningModule):
     def __init__(
         self,
         config,
         tokenizer,
         lr: float = 1e-5,
+        warmup_ratio: float = 0.0,
+        weight_decay: float = 0.01,        
         prompts: Optional[List[str]] = ["A dragon in a cave"],
         max_seq_len: int = 128,
         top_k: int = 50,
@@ -117,6 +119,10 @@ class GPT2Module(pl.LightningModule):
         x, y = batch
         logits, loss = self.model(x, y, attention_mask=None)
         self.log("train_loss", loss, prog_bar=True)
+
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("lr", lr, prog_bar=False)
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -189,12 +195,50 @@ class GPT2Module(pl.LightningModule):
         mlf.set_tag(run_id, f"gen_preview_epoch_{self.current_epoch}", preview)
 
     def configure_optimizers(self):
-        print(f"lr = {self.lr}")
-        return torch.optim.AdamW(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
+        )
+        
+        # --- total steps (Lightning-safe) ---
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = int(self.hparams.warmup_ratio * total_steps)
+
+        # --- Warmup: near 0 → base LR ---
+        warmup = LinearLR(
+            optimizer,
+            start_factor=1e-8,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+
+        # --- Cosine decay ---
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, total_steps - warmup_steps),
+            eta_min=0.0,
+        )
+
+        # --- Combine ---
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_steps],
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",   # critical for warmup
+                "frequency": 1,
+            },
+        }
 
 
 
-class SFTGPT2Module(GPT2Module):
+class SFTGPT2Module(PreTrainGPT2Module):
 
     def forward(self, idx, attention_mask, question_length=None):
         B, T = idx.shape
@@ -888,6 +932,7 @@ class GPT2GRPOModule(GPT2SFTModule):
         generation_top_p: float = 0.95,
         clip_eps: float = 0.2,
         kl_beta: float = 0.02,
+        entropy_beta: float = 0.02,
         # reward_weights: Optional[Dict[str, float]] = None
         reward_config: Optional[StoryRewardConfig] = None,
         reward_weights: Optional[RewardWeights] = None,
@@ -1082,21 +1127,30 @@ class GPT2GRPOModule(GPT2SFTModule):
         B, T = gen_masks.shape
 
         gen_pos = torch.arange(T, device=all_ids.device, dtype=torch.long).expand(B,-1) 
-        gen_pos = gen_pos + (prompt_lengths - 1).view(B,-1)        
+        gen_pos = gen_pos + (prompt_lengths-1).view(B,-1)        
         
         # logits, _ = self(all_ids, attention_mask=all_masks)
         logits = self(all_ids, attention_mask=all_masks).logits
         
         log_probs= nn.functional.log_softmax(logits[:, :-1, :], dim=-1)
 
+        # # Entropy for logging only: detach first so autograd does not keep extra graph
+        # with torch.no_grad():
+        #     log_probs_detached = log_probs.detach()
+        #     probs = log_probs_detached.exp()
+        #     token_entropy = -(probs * log_probs_detached).sum(dim=-1)
+        #     token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
+        #     token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
+        #     avg_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
+
+
         # Entropy for logging only: detach first so autograd does not keep extra graph
-        with torch.no_grad():
-            log_probs_detached = log_probs.detach()
-            probs = log_probs_detached.exp()
-            token_entropy = -(probs * log_probs_detached).sum(dim=-1)
-            token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
-            token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
-            avg_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
+        probs = log_probs.exp()
+        token_entropy = -(probs * log_probs).sum(dim=-1)
+        token_entropy = token_entropy.gather(dim=-1, index=gen_pos)
+        token_entropy = token_entropy * gen_masks.to(token_entropy.dtype)
+        avg_entropy = token_entropy.sum() / gen_masks.sum().clamp_min(1)
+        
         
         token_log_probs = log_probs.gather(dim=-1, index=all_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
         
@@ -1138,8 +1192,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         prompt_masks = prompt_masks.expand(G, B, -1).transpose(1,0).contiguous().view(B*G, -1)
         prompt_lengths = prompt_lengths.expand(G, B).transpose(1,0).contiguous().view(B*G)
 
-        print(f"1) model is in training mode? - {self.model.training}")
-        print(f"1) reference model is in training mode? - {self.ref_policy.training}")
+        # print(f"1) model is in training mode? - {self.model.training}")
+        # print(f"1) reference model is in training mode? - {self.ref_policy.training}")
         
         was_training = self.training
         self.eval()
@@ -1147,8 +1201,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         if hasattr(self.judge, "eval"):
             self.judge.eval()
 
-        print(f"2) model is in training mode? - {self.model.training}")
-        print(f"2) reference model is in training mode? - {self.ref_policy.training}")
+        # print(f"2) model is in training mode? - {self.model.training}")
+        # print(f"2) reference model is in training mode? - {self.ref_policy.training}")
         
         all_ids, all_masks, all_lens, _, gen_masks, logp_old = self.generate_w_logp(
             prompt_ids,
@@ -1164,6 +1218,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         
         logp_new, avg_entropy = self.gen_token_logprobs(all_ids, all_masks, prompt_lengths, gen_masks)
 
+        print(f"avg_entropy = ", avg_entropy)
+        
         print("max diffence between new and old" ,(torch.exp(logp_new - logp_old) - 1).abs().max())
         
         with torch.no_grad():
@@ -1194,6 +1250,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         )
         
         loss, ppo_loss, kl_loss = self.grpo_loss(logp_new, logp_old, logp_ref, gen_masks, judgements["advantages"])
+        loss += self.hparams.entropy_beta * avg_entropy
+        
         avg_reward = judgements["rewards"].mean()
         std_reward = judgements["rewards"].std()
         avg_adv = judgements["advantages"].mean()
@@ -1217,8 +1275,8 @@ class GPT2GRPOModule(GPT2SFTModule):
         if was_training:
             self.train()
 
-        print(f"3) model is in training mode? - {self.model.training}")
-        print(f"3) reference model is in training mode? - {self.ref_policy.training}")        
+        # print(f"3) model is in training mode? - {self.model.training}")
+        # print(f"3) reference model is in training mode? - {self.ref_policy.training}")        
         
         # return loss, ppo_loss, kl_loss, avg_reward, avg_adv, std_adv, avg_entropy
         return output
@@ -1239,13 +1297,6 @@ class GPT2GRPOModule(GPT2SFTModule):
             else:
                 self.log(f"train_{k}", v, prog_bar=(k == "loss"))
 
-        # self.log("train_loss", loss, prog_bar=True)
-        # self.log("train_ppo", ppo_loss, prog_bar=False)
-        # self.log("train_kldiv", kl_loss, prog_bar=False)
-        # self.log("train_avg_reward", avg_reward, prog_bar=False)
-        # self.log("train_avg_adv", avg_adv, prog_bar=False)
-        # self.log("train_std_adv", std_adv, prog_bar=False)
-        # self.log("train_avg_ent", avg_entropy, prog_bar=False)
         self.log("lr", lr, prog_bar=False)
         return output["loss"]
 
@@ -1265,13 +1316,6 @@ class GPT2GRPOModule(GPT2SFTModule):
                 
         for k,v in output.items():
             self.log(f"val_{k}", v, prog_bar=(k == "loss"))
-        # self.log("val_loss", loss, prog_bar=True)
-        # self.log("val_ppo", ppo_loss, prog_bar=False)
-        # self.log("val_kldiv", kl_loss, prog_bar=False)
-        # self.log("val_avg_reward", avg_reward, prog_bar=False)
-        # self.log("val_avg_adv", avg_adv, prog_bar=False)
-        # self.log("val_std_adv", std_adv, prog_bar=False)        
-        # self.log("val_avg_ent", avg_entropy, prog_bar=False)
 
         return output
     

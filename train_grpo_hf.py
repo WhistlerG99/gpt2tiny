@@ -63,6 +63,7 @@ GRAD_ACC_STEPS=16
 GRAD_CLIP=1.0
 
 KL_BETA=0.02
+ENTROPY_BETA=0.02
 CLIP_EPS=0.2
 
 RW_WORDS = 0.25
@@ -70,6 +71,7 @@ RW_POS = 0.15
 RW_SUBJECT = 0.20
 RW_FEATURES = 0.25
 RW_FORMAT = 0.15
+RW_COHERENCE = 0.25
 RW_PROMPT_COPY_PENALTY = 0.10
 RW_META_PENALTY = 0.10
 RW_REPETITION_PENALTY = 0.10
@@ -82,6 +84,12 @@ RW_MAX_SENTENCES=5
 
 CHECKPOINT_DIR = "./checkpoints"
 MLRUNS_DIR = "./mlruns"
+
+# Generation settings used whenever validation runs
+GEN_MAX_NEW_TOKENS = 248
+GEN_TEMPERATURE = 0.8
+GEN_TOP_K = 50
+GEN_TOP_P = 0.95
 
 # Supply prompts here later
 GENERATION_PROMPTS = [   
@@ -191,11 +199,6 @@ GENERATION_PROMPTS = [
     },
 ]
 
-# Generation settings used whenever validation runs
-GEN_MAX_NEW_TOKENS = 248
-GEN_TEMPERATURE = 0.8
-GEN_TOP_K = 50
-GEN_TOP_P = 0.95
 
 # Precision / hardware
 MATMUL_PRECISION = "medium"   # "medium" or "high"
@@ -284,6 +287,7 @@ def main(
         subject=args.rw_subject,
         features=args.rw_features,
         format=args.rw_format,
+        coherence=args.rw_coherence,
         prompt_copy_penalty=args.rw_prompt_copy_penalty,
         meta_penalty=args.rw_meta_penalty,
         repetition_penalty=args.rw_repetition_penalty,
@@ -314,12 +318,21 @@ def main(
         generation_top_k=args.gen_top_k,
         generation_top_p=args.gen_top_p,
         kl_beta=args.kl_beta,
+        entropy_beta=args.entropy_beta,
         clip_eps=args.clip_eps,
         reward_weights=reward_weights,
         reward_config=reward_config,
     )
 
     module = torch.compile(module).train()
+
+    for layer in module.model.modules():
+        if isinstance(layer, nn.Dropout):
+            layer.p = 0.0
+    
+    
+    print(module)
+
     
     mlf_logger = MLFlowLogger(
         experiment_name=args.exp_name,
@@ -392,12 +405,14 @@ def main(
             "top_k": args.top_k,
             "top_p": args.top_p,
             "kl_beta": args.kl_beta,
+            "entropy_beta": args.entropy_beta,
             "clip_eps": args.clip_eps,
             "rw_words": args.rw_words,
             "rw_pos": args.rw_pos,
             "rw_subject": args.rw_subject,
             "rw_features": args.rw_features,
             "rw_format": args.rw_format,
+            "rw_coherence":  args.rw_coherence,
             "rw_prompt_copy_penalty": args.rw_prompt_copy_penalty,
             "rw_meta_penalty": args.rw_meta_penalty,
             "rw_repetition_penalty": args.rw_repetition_penalty,
@@ -436,9 +451,10 @@ if __name__ == "__main__":
     parser.add_argument("--top-k", type=int, default=TOP_K, help="top-k for GRPO sampling")
     parser.add_argument("--top-p", type=float, default=TOP_P, help="top-p for GRPO sampling")
 
-    parser.add_argument("--kl-beta", type=float, default=KL_BETA, help="top-p for GRPO sampling")
-    parser.add_argument("--clip-eps", type=float, default=CLIP_EPS, help="top-p for GRPO sampling")
+    parser.add_argument("--kl-beta", type=float, default=KL_BETA, help="strength of the KL loss term")
+    parser.add_argument("--clip-eps", type=float, default=CLIP_EPS, help="PPO clipping margin")
     
+    parser.add_argument("--entropy-beta", type=float, default=ENTROPY_BETA, help="strength of the entropy loss term")
     
     parser.add_argument("--lr", type=float, default=LR, help="learning rate")
     parser.add_argument("--warmup-ratio", type=float, default=WARMUP_RATIO, help="warmup ratio")
@@ -462,6 +478,7 @@ if __name__ == "__main__":
     parser.add_argument("--rw-subject", type=float, default=RW_SUBJECT, help="Reward weights (embedding) - subject adherence")
     parser.add_argument("--rw-features", type=float, default=RW_FEATURES, help="Reward weights (embedding) - required features")
     parser.add_argument("--rw-format", type=float, default=RW_FORMAT, help="Reward weights (embedding) - formatting")
+    parser.add_argument("--rw-coherence", type=float, default=RW_COHERENCE, help="Reward weights (embedding) - coherence/gibberish")
     parser.add_argument("--rw-prompt-copy-penalty", type=float, default=RW_PROMPT_COPY_PENALTY, help="Reward weights (embedding) - prompt copy penalty")
     parser.add_argument("--rw-meta-penalty", type=float, default=RW_META_PENALTY, help="Reward weights (embedding) - meta-writing penalty")
     parser.add_argument("--rw-repetition-penalty", type=float, default=RW_REPETITION_PENALTY, help="Reward weights (embedding) - repetition penalty")

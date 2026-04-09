@@ -11,7 +11,8 @@ import torch
 import spacy
 from sentence_transformers import SentenceTransformer
 
-
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch.nn.functional as F
 # ============================================================
 # Dataclasses
 # ============================================================
@@ -41,6 +42,7 @@ class RewardWeights:
     subject: float = 0.20
     features: float = 0.25
     format: float = 0.15
+    coherence: float = 0.25
 
     prompt_copy_penalty: float = 0.10
     meta_penalty: float = 0.10
@@ -199,6 +201,15 @@ class StoryReward:
             ],
         }
 
+        # --- NEW: gibberish detector ---
+        self.gibberish_tokenizer = AutoTokenizer.from_pretrained(
+            "madhurjindal/autonlp-Gibberish-Detector-492513457"
+        )
+        self.gibberish_model = AutoModelForSequenceClassification.from_pretrained(
+            "madhurjindal/autonlp-Gibberish-Detector-492513457"
+        )
+        self.gibberish_model.eval()
+
     # ========================================================
     # Public API
     # ========================================================
@@ -218,6 +229,9 @@ class StoryReward:
         doc = self.nlp(text)
         sentences = [s.text.strip() for s in doc.sents if s.text.strip()]
 
+        # --- NEW ---
+        gibberish_coherence = self.score_gibberish_sentence_level(sentences)
+        
         words_score = self.score_required_words(doc, required_words)
         pos_score = self.score_pos_usage(doc, required_words)
         subject_score = self.score_subject(doc, sentences, subject)
@@ -262,7 +276,11 @@ class StoryReward:
         if has_features:
             positive_sum += self.weights.features * features_score
             active_weight_sum += self.weights.features
-        
+
+        # --- NEW: coherence weight (tunable) ---        
+        positive_sum += self.weights.coherence * gibberish_coherence
+        active_weight_sum += self.weights.coherence
+
         # format is always active
         positive_sum += self.weights.format * format_score
         active_weight_sum += self.weights.format
@@ -290,6 +308,7 @@ class StoryReward:
                 "subject": subject_score,
                 "features": features_score,
                 "format": format_score,
+                "coherence": gibberish_coherence,  # <-- NEW
             },
             "feature_breakdown": feature_breakdown,
             "penalties": {
@@ -457,6 +476,9 @@ class StoryReward:
         )
         rewards = out["rewards"]
 
+        # if sharpen:
+        #     rewards = torch.tanh(2*rewards)
+        
         if rewards.numel() % group_size != 0:
             raise ValueError(
                 f"Batch size {rewards.numel()} is not divisible by group_size={group_size}"
@@ -818,6 +840,49 @@ class StoryReward:
             1.0,
         ))
 
+    # ========================================================
+    # Coherence / gibberish detection
+    # ========================================================
+    def score_gibberish_coherence(self, text: str) -> float:
+        """
+        Uses pretrained gibberish detector.
+        
+        Returns:
+            coherence score in [0,1]
+            1.0 = fully coherent
+            0.0 = gibberish
+        """
+        if not text or len(text.strip()) < 5:
+            return 0.0
+    
+        inputs = self.gibberish_tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+        )
+    
+        with torch.no_grad():
+            outputs = self.gibberish_model(**inputs)
+            probs = F.softmax(outputs.logits, dim=-1).squeeze(0)
+    
+        # Model is binary: [not_gibberish, gibberish]
+        not_gibberish_prob = probs[0].item()
+    
+        return float(np.clip(not_gibberish_prob, 0.0, 1.0))
+
+    def score_gibberish_sentence_level(self, sentences: Sequence[str]) -> float:
+        """
+        Averages coherence across sentences.
+        More sensitive to local nonsense than full-text scoring.
+        """
+        if not sentences:
+            return 0.0
+    
+        scores = [self.score_gibberish_coherence(s) for s in sentences]
+    
+        return float(np.mean(scores))
+    
     # ========================================================
     # Penalties
     # ========================================================
