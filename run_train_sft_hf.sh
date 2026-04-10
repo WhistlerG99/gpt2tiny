@@ -1,7 +1,19 @@
+MLF_DIR=/teamspace/studios/this_studio/gpt2tiny/mlruns
+
+EXP_NAME=sft-hf
+# EXP_NAME=test
+
+RUN_PREFIX=sft-hf
+# RUN_PREFIX=test
+
+MODEL_NAME=SFTGPT2HF
+# MODEL_NAME=test
+
+
 python train_sft_hf.py \
-    --exp-name sft-hf \
-    --run-prefix sft-hf \
-    --model-name SFTGPT2HF \
+    --exp-name $EXP_NAME \
+    --run-prefix $RUN_PREFIX \
+    --model-name $MODEL_NAME \
     --lr 3e-5 \
     --warmup-ratio 0.05 \
     --batch-size 8 \
