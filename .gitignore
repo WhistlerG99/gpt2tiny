@@ -6,3 +6,4 @@ mlflow_artifacts/
 scratch/
 build/
 *.egg-info
+.env
