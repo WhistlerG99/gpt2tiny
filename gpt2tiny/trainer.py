@@ -235,6 +235,29 @@ class PreTrainGPT2Module(pl.LightningModule):
                 "frequency": 1,
             },
         }
+    
+    @torch.no_grad()
+    def generate_from_prompts(self, prompts, **kwargs):
+        self.eval()
+        results = []
+        for prompt in prompts:
+            completion_text = self.model.generate(
+                prompt,
+                max_new_tokens=kwargs.get("max_new_tokens", self.hparams.max_seq_len),
+                temperature=kwargs.get("temperature", self.hparams.temperature),
+                top_k=kwargs.get("top_k", self.hparams.top_k),
+                top_p=kwargs.get("top_p", self.hparams.top_p),
+                tokenizer=self.tokenizer,
+            )
+
+            results.append(
+                {
+                    "prompt": prompt,
+                    "completion": completion_text,
+                }
+            )
+
+        return results    
 
 
 
@@ -867,7 +890,7 @@ class GPT2SFTModule(pl.LightningModule):
         return {"val_loss": loss.detach(), "val_entropy": entropy.detach()}
 
     @torch.no_grad()
-    def generate_from_prompts(self, prompts: List[str]) -> List[dict]:
+    def generate_from_prompts(self, prompts: List[str], **kwargs) -> List[dict]:
         self.eval()
 
         results = []
@@ -885,11 +908,11 @@ class GPT2SFTModule(pl.LightningModule):
             generated_ids = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=self.hparams.generation_max_new_tokens,
-                do_sample=True,
-                temperature=self.hparams.generation_temperature,
-                top_k=self.hparams.generation_top_k,
-                top_p=self.hparams.generation_top_p,
+                max_new_tokens=kwargs.get("max_new_tokens", self.hparams.generation_max_new_tokens),
+                do_sample=kwargs.get("do_sample", True),
+                temperature=kwargs.get("temperature", self.hparams.generation_temperature),
+                top_k=kwargs.get("top_k", self.hparams.generation_top_k),
+                top_p=kwargs.get("top_p", self.hparams.generation_top_p),
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
@@ -1321,7 +1344,7 @@ class GPT2GRPOModule(GPT2SFTModule):
     
 
     @torch.no_grad()
-    def generate_from_prompts(self, prompts: List[str]) -> List[dict]:
+    def generate_from_prompts(self, prompts: List[str], **kwargs) -> List[dict]:
         self.eval()
 
         results = []
@@ -1339,11 +1362,11 @@ class GPT2GRPOModule(GPT2SFTModule):
             generated_ids = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=self.hparams.generation_max_new_tokens,
-                do_sample=True,
-                temperature=self.hparams.generation_temperature,
-                top_k=self.hparams.generation_top_k,
-                top_p=self.hparams.generation_top_p,
+                max_new_tokens=kwargs.get("max_new_tokens", self.hparams.generation_max_new_tokens),
+                do_sample=kwargs.get("do_sample", True),
+                temperature=kwargs.get("temperature", self.hparams.generation_temperature),
+                top_k=kwargs.get("top_k", self.hparams.generation_top_k),
+                top_p=kwargs.get("top_p", self.hparams.generation_top_p),
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )

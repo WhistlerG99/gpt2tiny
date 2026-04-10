@@ -12,7 +12,9 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import MLFlowLogger
+from importlib.metadata import version
 
+pkg_version = version("gpt2tiny")
 
 class UploadLastAndBestToMLflow(Callback):
     """
@@ -147,7 +149,7 @@ class LightningPyfunc(mlflow.pyfunc.PythonModel):
         self.model = None
 
     def load_context(self, context):
-        self.model = self.module_cls.load_from_checkpoint(context.artifacts["checkpoint"])
+        self.model = self.module_cls.load_from_checkpoint(context.artifacts["checkpoint"], weights_only=False)
         self.model.eval()
 
     def predict(self, context, model_input):
@@ -186,28 +188,23 @@ class LogBestCkptAndPyfuncToMLflow(Callback):
         
         with mlflow.start_run(run_id=run_id):
 
-            print("ckpt_artifact_subdir: ", self.ckpt_artifact_subdir)
-            print("pyfunc_artifact_path: ", self.pyfunc_artifact_path)
-            print("best_ckpt: ", best_ckpt)
-            print("ckpt_cb: ", ckpt_cb)
-            print("1) Log raw Lightning checkpoint")
             mlflow.log_artifact(best_ckpt, artifact_path=self.ckpt_artifact_subdir)
 
-            print("2) Log MLflow pyfunc model that *includes* the checkpoint as an artifact")
             mlflow.pyfunc.log_model(
                 artifact_path=self.pyfunc_artifact_path,
                 python_model=LightningPyfunc(self.module_cls),
                 artifacts={"checkpoint": best_ckpt},
+                code_paths=[str(Path(__import__("gpt2tiny").__file__).resolve().parent)],
                 pip_requirements=[
                     "mlflow",
                     "torch",
                     "pytorch-lightning",
                     "pandas",
                     "numpy",
+                    f"gpt2tiny=={pkg_version}",
                 ],
             )
 
-            print("optional: register the pyfunc model")
             if self.register_name:
                 model_uri = f"runs:/{run_id}/{self.pyfunc_artifact_path}"
                 mlflow.register_model(model_uri=model_uri, name=self.register_name)
