@@ -6,3 +6,6 @@ mlflow_artifacts/
 scratch/
 build/
 *.egg-info
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/

@@ -41,11 +41,13 @@ class RewardWeights:
     subject: float = 0.20
     features: float = 0.25
     format: float = 0.15
+    coherence: float = 0.15
 
     prompt_copy_penalty: float = 0.10
     meta_penalty: float = 0.10
     repetition_penalty: float = 0.10
     stuffing_penalty: float = 0.10
+    gibberish_penalty: float = 0.20
 
 
 @dataclass
@@ -61,6 +63,8 @@ class StoryRewardConfig:
 
     feature_similarity_threshold: float = 0.35
     subject_similarity_threshold: float = 0.35
+    sentence_coherence_similarity_low: float = 0.20
+    sentence_coherence_similarity_high: float = 0.90
 
     max_reasonable_occurrences_per_required_word: int = 3
 
@@ -223,11 +227,13 @@ class StoryReward:
         subject_score = self.score_subject(doc, sentences, subject)
         features_score, feature_breakdown = self.score_features(doc, sentences, required_features)
         format_score = self.score_format(doc, sentences)
+        coherence_score = self.score_sentence_coherence(doc, sentences)
 
         prompt_copy_pen = self.penalty_prompt_copy(text, prompt, required_words)
         meta_pen = self.penalty_meta_language(text)
         repetition_pen = self.penalty_repetition(doc)
         stuffing_pen = self.penalty_keyword_stuffing(doc, required_words)
+        gibberish_pen = self.penalty_gibberish(doc, sentences, text)
 
         # raw_total = (
         #     self.weights.words * words_score
@@ -266,6 +272,8 @@ class StoryReward:
         # format is always active
         positive_sum += self.weights.format * format_score
         active_weight_sum += self.weights.format
+        positive_sum += self.weights.coherence * coherence_score
+        active_weight_sum += self.weights.coherence
         
         positive_score = positive_sum / max(active_weight_sum, 1e-8)
         
@@ -273,6 +281,7 @@ class StoryReward:
         penalty_total += self.weights.prompt_copy_penalty * prompt_copy_pen
         penalty_total += self.weights.meta_penalty * meta_pen
         penalty_total += self.weights.repetition_penalty * repetition_pen
+        penalty_total += self.weights.gibberish_penalty * gibberish_pen
         
         if has_required_words:
             penalty_total += self.weights.stuffing_penalty * stuffing_pen
@@ -290,6 +299,7 @@ class StoryReward:
                 "subject": subject_score,
                 "features": features_score,
                 "format": format_score,
+                "coherence": coherence_score,
             },
             "feature_breakdown": feature_breakdown,
             "penalties": {
@@ -297,6 +307,7 @@ class StoryReward:
                 "meta_language": meta_pen,
                 "repetition": repetition_pen,
                 "keyword_stuffing": stuffing_pen,
+                "gibberish": gibberish_pen,
             },
             "debug": {
                 "n_sentences": len(sentences),
@@ -818,6 +829,35 @@ class StoryReward:
             1.0,
         ))
 
+    def score_sentence_coherence(self, doc, sentences: Sequence[str]) -> float:
+        if len(sentences) <= 1:
+            return 0.0
+
+        pair_scores = []
+        for prev_sent, next_sent in zip(sentences, sentences[1:]):
+            semantic_sim = self._pair_similarity(prev_sent, next_sent)
+            semantic_score = self._band_score(
+                value=semantic_sim,
+                lo=self.config.sentence_coherence_similarity_low,
+                hi=self.config.sentence_coherence_similarity_high,
+                softness=0.15,
+            )
+
+            prev_doc = self.nlp(prev_sent)
+            next_doc = self.nlp(next_sent)
+            overlap_score = self._content_token_overlap(prev_doc, next_doc)
+
+            referential_markers = {"he", "she", "they", "it", "then", "after", "later", "finally", "but", "so"}
+            bridge_score = self._keyword_fraction(next_doc, referential_markers)
+
+            pair_scores.append(float(np.clip(
+                0.60 * semantic_score + 0.25 * overlap_score + 0.15 * bridge_score,
+                0.0,
+                1.0,
+            )))
+
+        return float(np.mean(pair_scores)) if pair_scores else 0.0
+
     # ========================================================
     # Penalties
     # ========================================================
@@ -886,6 +926,58 @@ class StoryReward:
             penalties.append(excess / 4.0)
 
         return float(np.clip(np.mean(penalties), 0.0, 1.0)) if penalties else 0.0
+
+    def penalty_gibberish(self, doc, sentences: Sequence[str], text: str) -> float:
+        if not text.strip():
+            return 1.0
+
+        alpha_tokens = [tok.text.lower() for tok in doc if tok.is_alpha]
+        if not alpha_tokens:
+            return 1.0
+
+        junk_pen = self._junk_text_penalty(text)
+
+        repeated_word_runs = 0
+        max_run = 1
+        current_run = 1
+        for prev_tok, tok in zip(alpha_tokens, alpha_tokens[1:]):
+            if tok == prev_tok:
+                current_run += 1
+                max_run = max(max_run, current_run)
+            else:
+                if current_run >= 3:
+                    repeated_word_runs += current_run - 2
+                current_run = 1
+        if current_run >= 3:
+            repeated_word_runs += current_run - 2
+        repeated_run_pen = np.clip(repeated_word_runs / max(1, len(alpha_tokens) * 0.25), 0.0, 1.0)
+
+        suspicious_tokens = 0
+        for tok in alpha_tokens:
+            unique_chars = len(set(tok))
+            has_vowel = any(ch in "aeiouy" for ch in tok)
+            if len(tok) >= 6 and (not has_vowel or unique_chars <= 2):
+                suspicious_tokens += 1
+            elif re.search(r"(.)\1{3,}", tok):
+                suspicious_tokens += 1
+        suspicious_pen = np.clip(suspicious_tokens / max(1, len(alpha_tokens) * 0.3), 0.0, 1.0)
+
+        unique_ratio = len(set(alpha_tokens)) / max(1, len(alpha_tokens))
+        low_diversity_pen = float(np.clip((0.35 - unique_ratio) / 0.20, 0.0, 1.0))
+
+        coherence_deficit = 0.0
+        if len(sentences) > 1:
+            coherence_deficit = 1.0 - self.score_sentence_coherence(doc, sentences)
+
+        return float(np.clip(
+            0.35 * junk_pen
+            + 0.25 * repeated_run_pen
+            + 0.20 * suspicious_pen
+            + 0.10 * low_diversity_pen
+            + 0.10 * coherence_deficit,
+            0.0,
+            1.0,
+        ))
 
     # ========================================================
     # Helpers
@@ -968,6 +1060,23 @@ class StoryReward:
         if not s_terms:
             return 0.0
         return len(s_terms & t_terms) / len(s_terms)
+
+    @staticmethod
+    def _content_token_overlap(doc_a, doc_b) -> float:
+        terms_a = {
+            tok.lemma_.lower()
+            for tok in doc_a
+            if tok.is_alpha and not tok.is_stop and tok.pos_ in {"NOUN", "VERB", "ADJ", "PROPN", "PRON"}
+        }
+        terms_b = {
+            tok.lemma_.lower()
+            for tok in doc_b
+            if tok.is_alpha and not tok.is_stop and tok.pos_ in {"NOUN", "VERB", "ADJ", "PROPN", "PRON"}
+        }
+
+        if not terms_a:
+            return 0.0
+        return len(terms_a & terms_b) / len(terms_a)
 
     def _score_sentence_semantic_match(self, sentences: Sequence[str], target_phrase: str) -> float:
         if not sentences or not target_phrase.strip():

@@ -70,10 +70,12 @@ RW_POS = 0.15
 RW_SUBJECT = 0.20
 RW_FEATURES = 0.25
 RW_FORMAT = 0.15
+RW_COHERENCE = 0.15
 RW_PROMPT_COPY_PENALTY = 0.10
 RW_META_PENALTY = 0.10
 RW_REPETITION_PENALTY = 0.10
 RW_STUFFING_PENALTY = 0.10
+RW_GIBBERISH_PENALTY = 0.20
 
 RW_MIN_CHARS=80
 RW_MAX_CHARS=2000
@@ -284,10 +286,12 @@ def main(
         subject=args.rw_subject,
         features=args.rw_features,
         format=args.rw_format,
+        coherence=args.rw_coherence,
         prompt_copy_penalty=args.rw_prompt_copy_penalty,
         meta_penalty=args.rw_meta_penalty,
         repetition_penalty=args.rw_repetition_penalty,
         stuffing_penalty=args.rw_stuffing_penalty,
+        gibberish_penalty=args.rw_gibberish_penalty,
     )
 
     reward_config = StoryRewardConfig(
@@ -398,10 +402,12 @@ def main(
             "rw_subject": args.rw_subject,
             "rw_features": args.rw_features,
             "rw_format": args.rw_format,
+            "rw_coherence": args.rw_coherence,
             "rw_prompt_copy_penalty": args.rw_prompt_copy_penalty,
             "rw_meta_penalty": args.rw_meta_penalty,
             "rw_repetition_penalty": args.rw_repetition_penalty,
             "rw_stuffing_penalty": args.rw_stuffing_penalty,
+            "rw_gibberish_penalty": args.rw_gibberish_penalty,
             "rw_min_chars": args.rw_min_chars,
             "rw_max_chars": args.rw_max_chars,
             "rw_min_sentences": args.rw_min_sentences,
@@ -462,10 +468,12 @@ if __name__ == "__main__":
     parser.add_argument("--rw-subject", type=float, default=RW_SUBJECT, help="Reward weights (embedding) - subject adherence")
     parser.add_argument("--rw-features", type=float, default=RW_FEATURES, help="Reward weights (embedding) - required features")
     parser.add_argument("--rw-format", type=float, default=RW_FORMAT, help="Reward weights (embedding) - formatting")
+    parser.add_argument("--rw-coherence", type=float, default=RW_COHERENCE, help="Reward weights (embedding) - sentence coherence")
     parser.add_argument("--rw-prompt-copy-penalty", type=float, default=RW_PROMPT_COPY_PENALTY, help="Reward weights (embedding) - prompt copy penalty")
     parser.add_argument("--rw-meta-penalty", type=float, default=RW_META_PENALTY, help="Reward weights (embedding) - meta-writing penalty")
     parser.add_argument("--rw-repetition-penalty", type=float, default=RW_REPETITION_PENALTY, help="Reward weights (embedding) - repetition penalty")
     parser.add_argument("--rw-stuffing-penalty", type=float, default=RW_STUFFING_PENALTY, help="Reward weights (embedding) - required word stuffing penalty")
+    parser.add_argument("--rw-gibberish-penalty", type=float, default=RW_GIBBERISH_PENALTY, help="Reward weights (embedding) - gibberish penalty")
     
     parser.add_argument("--rw-min-chars", type=int, default=RW_MIN_CHARS, help="Reward config (embedding) - minimum characters")
     parser.add_argument("--rw-max-chars", type=int, default=RW_MAX_CHARS, help="Reward config (embedding) - maximum characters")
