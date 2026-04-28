@@ -264,6 +264,17 @@ if __name__ == "__main__":
         help="Directory containing TinyStories_all_data/ shards and the tokenizer model; .bin files are written alongside the shards",
     )
 
+    # --- Pretrain: prepare (download + train-vocab + pretokenize-pretrain) ---
+    prepare_parser = subparsers.add_parser(
+        "prepare-pretrain",
+        help="Run the full pretrain pipeline: download, train-vocab, pretokenize-pretrain",
+    )
+    prepare_parser.add_argument("--vocab-size", type=int, required=True, help="Vocabulary size")
+    prepare_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory for downloading, tokenizer training, and pretokenization",
+    )
+    
     # --- SFT ---
     pretok_sft_parser = subparsers.add_parser("pretokenize-sft", help="Pretokenize dataset for SFT")
     pretok_sft_parser.add_argument(
@@ -298,5 +309,13 @@ if __name__ == "__main__":
         pretokenize_sft(args.tokenizer, args.data_dir)
     elif args.command == "pretokenize-rlhf":
         pretokenize_rlhf(args.tokenizer, args.data_dir)
+    elif args.command == "prepare-pretrain":
+        print("Step 1: Downloading dataset...")
+        download(args.data_dir)
+        print("\nStep 2: Training vocabulary...")
+        train_vocab(args.vocab_size, args.data_dir)
+        print("\nStep 3: Pretokenizing dataset...")
+        pretokenize_pretrain(args.vocab_size, args.data_dir)
+        print("\nDone.")
     else:
         parser.print_help()
