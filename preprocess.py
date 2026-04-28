@@ -5,7 +5,6 @@ import json
 import requests
 from pathlib import Path
 from tqdm import tqdm
-from typing import Optional
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -14,9 +13,6 @@ import glob
 from transformers import AutoTokenizer
 
 from gpt2tiny.tokenizer import Tokenizer
-
-DATA_CACHE_DIR = Path("data")
-DATA_CACHE_DIR.mkdir(exist_ok=True)
 
 
 def download_file(url: str, filename: str, chunk_size: int = 1024) -> None:
@@ -39,27 +35,34 @@ def download_file(url: str, filename: str, chunk_size: int = 1024) -> None:
 # Pretrain helpers
 # ---------------------------------------------------------------------------
 
-def download() -> None:
+def download(data_dir: Path) -> None:
+    """Download and extract TinyStories into data_dir/TinyStories_all_data/."""
+    data_dir.mkdir(parents=True, exist_ok=True)
     data_url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories_all_data.tar.gz"
-    data_filename = DATA_CACHE_DIR / "TinyStories_all_data.tar.gz"
+    data_filename = data_dir / "TinyStories_all_data.tar.gz"
 
     if not data_filename.exists():
         print("Downloading TinyStories dataset...")
         download_file(data_url, str(data_filename))
 
-    data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
-    if not data_dir.exists():
-        data_dir.mkdir(exist_ok=True)
+    extract_dir = data_dir / "TinyStories_all_data"
+    if not extract_dir.exists():
+        extract_dir.mkdir(exist_ok=True)
         print("Extracting TinyStories dataset...")
-        os.system(f"tar -xvf {data_filename} -C {data_dir}")
+        os.system(f"tar -xvf {data_filename} -C {extract_dir}")
 
 
-def train_vocab(vocab_size: int) -> None:
-    prefix = DATA_CACHE_DIR / f"tok{vocab_size}"
-    tiny_file = DATA_CACHE_DIR / "tiny.txt"
+def train_vocab(vocab_size: int, data_dir: Path) -> None:
+    """Train a SentencePiece tokenizer on TinyStories shards in data_dir.
 
-    data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
-    shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
+    Reads shards from data_dir/TinyStories_all_data/ and saves the tokenizer
+    model/vocab to data_dir/tok{vocab_size}.{model,vocab}.
+    """
+    prefix = data_dir / f"tok{vocab_size}"
+    tiny_file = data_dir / "tiny.txt"
+
+    shard_dir = data_dir / "TinyStories_all_data"
+    shard_filenames = sorted(glob.glob(str(shard_dir / "*.json")))
 
     with open(tiny_file, "w") as f:
         for shard in shard_filenames[:10]:
@@ -84,9 +87,9 @@ def train_vocab(vocab_size: int) -> None:
     )
 
 
-def process_shard_for_pretrain(args: tuple, vocab_size: int) -> None:
+def process_shard_for_pretrain(args: tuple, vocab_size: int, data_dir: Path) -> None:
     shard_id, shard = args
-    tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}.model"
+    tokenizer_model = data_dir / f"tok{vocab_size}.model"
     tokenizer = Tokenizer(str(tokenizer_model))
 
     with open(shard, "r") as f:
@@ -105,16 +108,17 @@ def process_shard_for_pretrain(args: tuple, vocab_size: int) -> None:
         f.write(all_tokens.tobytes())
 
 
-def pretokenize_pretrain(vocab_size: int) -> None:
-    data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
-    shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
-    func = partial(process_shard_for_pretrain, vocab_size=vocab_size)
+def pretokenize_pretrain(vocab_size: int, data_dir: Path) -> None:
+    shard_dir = data_dir / "TinyStories_all_data"
+    shard_filenames = sorted(glob.glob(str(shard_dir / "*.json")))
+    print(f"Found {len(shard_filenames)} shards in {shard_dir}")
+    func = partial(process_shard_for_pretrain, vocab_size=vocab_size, data_dir=data_dir)
     with ProcessPoolExecutor() as executor:
         executor.map(func, enumerate(shard_filenames))
 
 
 # ---------------------------------------------------------------------------
-# Shared HF tokenizer helpers
+# Shared HF tokenizer helper
 # ---------------------------------------------------------------------------
 
 def _hf_encode(tokenizer: AutoTokenizer, text: str, bos: bool, eos: bool) -> list:
@@ -171,8 +175,7 @@ def process_shard_for_sft(args: tuple, tokenizer_name: str) -> None:
         f.write(qa_indices.tobytes())
 
 
-def pretokenize_sft(tokenizer_name: str) -> None:
-    data_dir = DATA_CACHE_DIR / "TinyStories_prompts_huggingface_gpt2_v2"
+def pretokenize_sft(tokenizer_name: str, data_dir: Path) -> None:
     shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
     print(f"Found {len(shard_filenames)} shards in {data_dir}")
     func = partial(process_shard_for_sft, tokenizer_name=tokenizer_name)
@@ -216,8 +219,7 @@ def process_shard_for_rlhf(args: tuple, tokenizer_name: str) -> None:
         f.write(all_indices.tobytes())
 
 
-def pretokenize_rlhf(tokenizer_name: str) -> None:
-    data_dir = DATA_CACHE_DIR / "TinyStories_prompts_huggingface_gpt2_v2"
+def pretokenize_rlhf(tokenizer_name: str, data_dir: Path) -> None:
     shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
     print(f"Found {len(shard_filenames)} shards in {data_dir}")
     func = partial(process_shard_for_rlhf, tokenizer_name=tokenizer_name)
@@ -233,12 +235,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dataset preprocessing for pretrain, SFT, and RLHF")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # --- Pretrain ---
-    subparsers.add_parser("download", help="Download TinyStories dataset for pretraining")
+    # --- Pretrain: download ---
+    download_parser = subparsers.add_parser("download", help="Download TinyStories dataset for pretraining")
+    download_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory where the dataset will be downloaded and extracted",
+    )
 
+    # --- Pretrain: train-vocab ---
     vocab_parser = subparsers.add_parser("train-vocab", help="Train a SentencePiece tokenizer on TinyStories")
     vocab_parser.add_argument("--vocab-size", type=int, required=True, help="Vocabulary size")
+    vocab_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory containing TinyStories_all_data/ shards; tokenizer is saved here too",
+    )
 
+    # --- Pretrain: pretokenize ---
     pretok_pretrain_parser = subparsers.add_parser(
         "pretokenize-pretrain",
         help="Pretokenize TinyStories using the trained SentencePiece tokenizer",
@@ -247,12 +259,20 @@ if __name__ == "__main__":
         "--vocab-size", type=int, required=True,
         help="Vocabulary size matching the trained tokenizer (e.g. 4096)",
     )
+    pretok_pretrain_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory containing TinyStories_all_data/ shards and the tokenizer model; .bin files are written alongside the shards",
+    )
 
     # --- SFT ---
     pretok_sft_parser = subparsers.add_parser("pretokenize-sft", help="Pretokenize dataset for SFT")
     pretok_sft_parser.add_argument(
         "--tokenizer", type=str, required=True,
         help="HuggingFace model name (e.g. 'openai-community/gpt2') or local path to tokenizer",
+    )
+    pretok_sft_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory containing the JSON shards to pretokenize",
     )
 
     # --- RLHF ---
@@ -261,18 +281,22 @@ if __name__ == "__main__":
         "--tokenizer", type=str, required=True,
         help="HuggingFace model name (e.g. 'openai-community/gpt2') or local path to tokenizer",
     )
+    pretok_rlhf_parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory containing the JSON shards to pretokenize",
+    )
 
     args = parser.parse_args()
 
     if args.command == "download":
-        download()
+        download(args.data_dir)
     elif args.command == "train-vocab":
-        train_vocab(args.vocab_size)
+        train_vocab(args.vocab_size, args.data_dir)
     elif args.command == "pretokenize-pretrain":
-        pretokenize_pretrain(args.vocab_size)
+        pretokenize_pretrain(args.vocab_size, args.data_dir)
     elif args.command == "pretokenize-sft":
-        pretokenize_sft(args.tokenizer)
+        pretokenize_sft(args.tokenizer, args.data_dir)
     elif args.command == "pretokenize-rlhf":
-        pretokenize_rlhf(args.tokenizer)
+        pretokenize_rlhf(args.tokenizer, args.data_dir)
     else:
         parser.print_help()
