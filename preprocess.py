@@ -5,7 +5,7 @@ import json
 import requests
 from pathlib import Path
 from tqdm import tqdm
-from typing import Optional
+from typing import Optional, List
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -17,6 +17,12 @@ from gpt2tiny.tokenizer import Tokenizer
 
 DATA_CACHE_DIR = Path("/teamspace/studios/this_studio/gpt2tiny/data")
 DATA_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def arg_to_path_or_paths(value: str) -> Path | List[Path]:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    paths = [Path(p) for p in parts]
+    return paths[0] if len(paths) == 1 else paths
 
 
 def download_file(url: str, filename: str, chunk_size: int = 1024) -> None:
@@ -72,29 +78,48 @@ def download_math(nshard: int = 4) -> None:
                 json.dump(data[(idx*nsize):((idx+1)*nsize)], f)
 
 
-def train_vocab(vocab_size: int) -> None:
+def train_vocab(vocab_size: int, data_dir: Path|List[Path]) -> None:
     prefix = DATA_CACHE_DIR / f"tok{vocab_size}"
     tiny_file = DATA_CACHE_DIR / "tiny.txt"
 
+    if isinstance(data_dir, Path):
+        data_dir = [data_dir]
+    
+    shard_filenames = []
+    for path in data_dir:
+        if not path.exists():
+            raise FileNotFoundError(f"Data directory {path} does not exist")
+        shard_filenames.append(sorted(glob.glob(str(path / "*.json"))))
+        
     # data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
     # shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
 
-    data_dir = DATA_CACHE_DIR / "MetaMathQA"
-    math_filenames = sorted(glob.glob(str(data_dir / "*.json")))
+    # data_dir = DATA_CACHE_DIR / "MetaMathQA"
+    # math_filenames = sorted(glob.glob(str(data_dir / "*.json")))
 
     with open(tiny_file, "w") as f:
+        for shard_list in shard_filenames:
+            for shard in shard_list[:10]:
+                with open(shard, "r") as g:
+                    data = json.load(g)
+                for example in data:
+                    try:
+                        f.write(example["story"].strip() + "\n")
+                    except KeyError:
+                        f.write(example["query"].strip() + "\n")    
+                        f.write(example["response"].strip() + "\n")
         # for shard in shard_filenames[:10]:
         #     with open(shard, "r") as g:
         #         data = json.load(g)
         #     for example in data:
         #         f.write(example["story"].strip() + "\n")
 
-        for shard in math_filenames:
-            with open(shard, "r") as g:
-                data = json.load(g)
-            for example in data:
-                f.write(example["query"].strip() + "\n")    
-                f.write(example["response"].strip() + "\n")    
+        # for shard in math_filenames:
+        #     with open(shard, "r") as g:
+        #         data = json.load(g)
+        #     for example in data:
+        #         f.write(example["query"].strip() + "\n")    
+        #         f.write(example["response"].strip() + "\n")    
     
     spm.SentencePieceTrainer.train(
         input=str(tiny_file),
@@ -263,6 +288,12 @@ if __name__ == "__main__":
     vocab_parser.add_argument(
         "--vocab-size", type=int, required=True, help="Size of vocabulary to train"
     )
+    vocab_parser.add_argument(
+        "--data-dir",
+        type=arg_to_path_or_paths,
+        default=DATA_CACHE_DIR / "TinyStories_all_data",
+        help="Directory or comma-separated list of directories containing the dataset JSON files"
+    )
 
     pretok_sft_parser = subparsers.add_parser("pretokenize-sft", help="Pretokenize the dataset for SFT")
     pretok_sft_parser.add_argument(
@@ -292,14 +323,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.command == "download":
-        download()
-        download_math()
-    elif args.command == "train-vocab":
-        train_vocab(args.vocab_size)
-    elif args.command in ("pretokenize-sft", "pretokenize-rlhf"):
-        pretokenize(args.command, args.vocab_size)
-    elif args.command == "prepare-dataset":
-        prepare_dataset(args.vocab_size)
-    else:
-        parser.print_help()
+    print(dir(args.data_dir))
+    # print(dir(vocab_parser))
+
+    # if args.command == "download":
+    #     download()
+    #     download_math()
+    # elif args.command == "train-vocab":
+    #     train_vocab(args.vocab_size)
+    # elif args.command in ("pretokenize-sft", "pretokenize-rlhf"):
+    #     pretokenize(args.command, args.vocab_size)
+    # elif args.command == "prepare-dataset":
+    #     prepare_dataset(args.vocab_size)
+    # else:
+    #     parser.print_help()
