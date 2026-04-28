@@ -238,16 +238,19 @@ if __name__ == "__main__":
     # --- Pretrain: download ---
     download_parser = subparsers.add_parser("download", help="Download TinyStories dataset for pretraining")
     download_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory where the dataset will be downloaded and extracted",
+        "--data-dir", type=Path, default=Path("data"),
+        help="Directory where the dataset will be downloaded and extracted (default: data/)",
     )
 
     # --- Pretrain: train-vocab ---
     vocab_parser = subparsers.add_parser("train-vocab", help="Train a SentencePiece tokenizer on TinyStories")
-    vocab_parser.add_argument("--vocab-size", type=int, required=True, help="Vocabulary size")
     vocab_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory containing TinyStories_all_data/ shards; tokenizer is saved here too",
+        "--vocab-size", type=int, default=4096,
+        help="Vocabulary size (default: 4096)",
+    )
+    vocab_parser.add_argument(
+        "--data-dir", type=Path, default=Path("data"),
+        help="Directory containing TinyStories_all_data/ shards; tokenizer is saved here too (default: data/)",
     )
 
     # --- Pretrain: pretokenize ---
@@ -256,12 +259,12 @@ if __name__ == "__main__":
         help="Pretokenize TinyStories using the trained SentencePiece tokenizer",
     )
     pretok_pretrain_parser.add_argument(
-        "--vocab-size", type=int, required=True,
-        help="Vocabulary size matching the trained tokenizer (e.g. 4096)",
+        "--vocab-size", type=int, default=4096,
+        help="Vocabulary size matching the trained tokenizer (default: 4096)",
     )
     pretok_pretrain_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory containing TinyStories_all_data/ shards and the tokenizer model; .bin files are written alongside the shards",
+        "--data-dir", type=Path, default=Path("data"),
+        help="Directory containing TinyStories_all_data/ shards and the tokenizer model; .bin files are written alongside the shards (default: data/)",
     )
 
     # --- Pretrain: prepare (download + train-vocab + pretokenize-pretrain) ---
@@ -269,32 +272,35 @@ if __name__ == "__main__":
         "prepare-pretrain",
         help="Run the full pretrain pipeline: download, train-vocab, pretokenize-pretrain",
     )
-    prepare_parser.add_argument("--vocab-size", type=int, required=True, help="Vocabulary size")
     prepare_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory for downloading, tokenizer training, and pretokenization",
+        "--vocab-size", type=int, default=4096,
+        help="Vocabulary size (default: 4096)",
     )
-    
+    prepare_parser.add_argument(
+        "--data-dir", type=Path, default=Path("data"),
+        help="Directory for downloading, tokenizer training, and pretokenization (default: data/)",
+    )
+
     # --- SFT ---
     pretok_sft_parser = subparsers.add_parser("pretokenize-sft", help="Pretokenize dataset for SFT")
     pretok_sft_parser.add_argument(
-        "--tokenizer", type=str, required=True,
-        help="HuggingFace model name (e.g. 'openai-community/gpt2') or local path to tokenizer",
+        "--tokenizer", type=str, default="gpt2",
+        help="HuggingFace model name or local path to tokenizer (default: gpt2)",
     )
     pretok_sft_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory containing the JSON shards to pretokenize",
+        "--data-dir", type=Path, default=Path("data/TinyStories_custom_prompts_w_completions_sft_huggingface_gpt2_v1"),
+        help="Directory containing the JSON shards to pretokenize (default: data/TinyStories_custom_prompts_w_completions_sft_huggingface_gpt2_v1/)",
     )
 
     # --- RLHF ---
     pretok_rlhf_parser = subparsers.add_parser("pretokenize-rlhf", help="Pretokenize dataset for RLHF")
     pretok_rlhf_parser.add_argument(
-        "--tokenizer", type=str, required=True,
-        help="HuggingFace model name (e.g. 'openai-community/gpt2') or local path to tokenizer",
+        "--tokenizer", type=str, default="gpt2",
+        help="HuggingFace model name or local path to tokenizer (default: gpt2)",
     )
     pretok_rlhf_parser.add_argument(
-        "--data-dir", type=Path, required=True,
-        help="Directory containing the JSON shards to pretokenize",
+        "--data-dir", type=Path, default=Path("data/TinyStories_prompts_huggingface_gpt2_v2"),
+        help="Directory containing the JSON shards to pretokenize (default: data/TinyStories_prompts_huggingface_gpt2_v2/)",
     )
 
     args = parser.parse_args()
