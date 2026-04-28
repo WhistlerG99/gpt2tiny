@@ -5,15 +5,17 @@ import json
 import requests
 from pathlib import Path
 from tqdm import tqdm
+from typing import Optional
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import sentencepiece as spm
 import glob
+from transformers import AutoTokenizer
 
 from gpt2tiny.tokenizer import Tokenizer
 
-DATA_CACHE_DIR = Path("data")
+DATA_CACHE_DIR = Path("/teamspace/studios/this_studio/gpt2tiny/data")
 DATA_CACHE_DIR.mkdir(exist_ok=True)
 
 
@@ -135,11 +137,12 @@ def train_vocab(vocab_size: int) -> None:
 #         f.write(all_tokens.tobytes())
 
 
-def process_shard(args: tuple, vocab_size: int) -> None:
+def process_shard_for_sft(args: tuple, vocab_size: Optional[int] = None) -> None:
     shard_id, shard = args
-    tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}.model"
-    tokenizer = Tokenizer(str(tokenizer_model))
-
+    # tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}_tinystories.model"
+    # tokenizer = Tokenizer(str(tokenizer_model))
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+    
     with open(shard, "r") as f:
         data = json.load(f)
 
@@ -148,12 +151,17 @@ def process_shard(args: tuple, vocab_size: int) -> None:
     idx = 0
     for example in tqdm(data, position=shard_id):
 
-        text = example["query"].strip()  
-        q_tokens = tokenizer.encode(text, bos=True, eos=True)
+        # text = example["query"].strip()
+        try:           
+            text = example["instruction"]["prompt"]
+        except KeyError:
+            text = example["instruction"]["prompt:"]
+        q_tokens = tokenizer.encode(text, bos=True, eos=False)
         q_len = len(q_tokens)
         
-        text = example["response"].strip()  
-        a_tokens = tokenizer.encode(text, bos=True, eos=True)
+        # text = example["response"].strip()
+        text = example["story"].strip()
+        a_tokens = tokenizer.encode(text, bos=False, eos=True)
         a_len = len(a_tokens)
 
         if q_len + a_len <= 512:
@@ -177,13 +185,56 @@ def process_shard(args: tuple, vocab_size: int) -> None:
         f.write(qa_indices.tobytes())
 
 
-def pretokenize(vocab_size: int) -> None:
-    # data_dir = DATA_CACHE_DIR / "TinyStories_all_data"
+def process_shard_for_rlhf(args: tuple, vocab_size: Optional[int] = None) -> None:
+    shard_id, shard = args
+    # tokenizer_model = DATA_CACHE_DIR / f"tok{vocab_size}_tinystories.model"
+    # tokenizer = Tokenizer(str(tokenizer_model))
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    
+    with open(shard, "r") as f:
+        data = json.load(f)
+
+    all_tokens = []
+    all_indices = [0]
+    idx = 0
+    for example in tqdm(data, position=shard_id):
+
+        text = example["prompt"]
+        p_tokens = tokenizer.encode(text, bos=True, eos=False)
+        p_len = len(p_tokens)
+        
+
+        if p_len <= 248:
+            all_tokens.extend(p_tokens)
+            idx += p_len
+            all_indices.extend([idx])
+
+    all_tokens = np.array(all_tokens, dtype=np.uint16)
+    all_indices = np.array(all_indices, dtype=np.uint32)
+    
+    tokenized_filename = str(shard).replace(".json", ".bin")    
+    
+    with open(tokenized_filename, "wb") as f:
+        f.write(all_tokens.tobytes())
+
+    indices_filename = re.sub(r"data(\d{2})\.json$", r"indices\1.bin", str(shard))
+
+    with open(indices_filename, "wb") as f:
+        f.write(all_indices.tobytes())
+
+
+def pretokenize(command: str, vocab_size: Optional[int] = None) -> None:
+    data_dir = DATA_CACHE_DIR / "TinyStories_prompts_huggingface_gpt2_v2"
+    shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
+    print(shard_filenames)
+    # data_dir = DATA_CACHE_DIR / "MetaMathQA"
     # shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
 
-    data_dir = DATA_CACHE_DIR / "MetaMathQA"
-    shard_filenames = sorted(glob.glob(str(data_dir / "*.json")))
-    
+    if command == "pretokenize-sft":
+        process_shard = process_shard_for_sft
+    elif command == "pretokenize-rlhf":
+        process_shard = process_shard_for_rlhf
+        
     func = partial(process_shard, vocab_size=vocab_size)
     with ProcessPoolExecutor() as executor:
         executor.map(func, enumerate(shard_filenames))
@@ -201,7 +252,7 @@ def prepare_dataset(vocab_size: int) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process MetaMathQA datasets")
+    parser = argparse.ArgumentParser(description="Process datasets")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     download_parser = subparsers.add_parser(
@@ -213,13 +264,21 @@ if __name__ == "__main__":
         "--vocab-size", type=int, required=True, help="Size of vocabulary to train"
     )
 
-    pretok_parser = subparsers.add_parser("pretokenize", help="Pretokenize the dataset")
-    pretok_parser.add_argument(
+    pretok_sft_parser = subparsers.add_parser("pretokenize-sft", help="Pretokenize the dataset for SFT")
+    pretok_sft_parser.add_argument(
         "--vocab-size",
         type=int,
-        required=True,
+        required=False,
         help="Vocabulary size to use for tokenization",
     )
+
+    pretok_grpo_parser = subparsers.add_parser("pretokenize-rlhf", help="Pretokenize the dataset for RLHF")
+    pretok_grpo_parser.add_argument(
+        "--vocab-size",
+        type=int,
+        required=False,
+        help="Vocabulary size to use for tokenization",
+    )    
 
     prepare_parser = subparsers.add_parser(
         "prepare-dataset", help="Run all dataset preparation steps sequentially"
@@ -238,8 +297,8 @@ if __name__ == "__main__":
         download_math()
     elif args.command == "train-vocab":
         train_vocab(args.vocab_size)
-    elif args.command == "pretokenize":
-        pretokenize(args.vocab_size)
+    elif args.command in ("pretokenize-sft", "pretokenize-rlhf"):
+        pretokenize(args.command, args.vocab_size)
     elif args.command == "prepare-dataset":
         prepare_dataset(args.vocab_size)
     else:
